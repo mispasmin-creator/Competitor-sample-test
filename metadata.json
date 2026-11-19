@@ -1,0 +1,6 @@
+{
+  "name": "Competitor Sample Lab",
+  "description": "Laboratory benchmarking workspace for collecting competitor samples from lost sales orders, executing standardized tests, and comparing product performance.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
