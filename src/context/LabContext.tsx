@@ -257,7 +257,7 @@ export function LabProvider({ children }: { children: React.ReactNode }) {
       setToasts((prev) => [...prev, { ...toast, id }]);
       window.setTimeout(() => {
         dismissToast(id);
-      }, 4500);
+      }, 3200);
     },
     [dismissToast]
   );

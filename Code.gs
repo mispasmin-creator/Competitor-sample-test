@@ -9,7 +9,7 @@
  *      Planned 3 filled & Actual 3 empty -> Stage 3 (Sample Received)
  *      Planned 4 filled & Actual 4 empty -> Stage 4 (Test Entry)
  *  - Case-insensitive sheet matching for FMS/Fms, Masters/Master, Users/users.
- *  - Password column supports plain text (auto-hashed on first login) or SHA-256 hash.
+ *  - Password column stores plain text (legacy SHA-256 hashes are still accepted at login).
  * Setup: run setup() once, then Deploy > Web app (Execute as Me, Access Anyone). After edits: Deploy > Manage > New version.
  */
 const T = { fms: 'FMS', users: 'Users', masters: 'Masters' }, ID = 'caseId', HR = 5, DR = 6, FOLDER = 'Competitor Sample Lab Files', FOLDER_ID = '1YUOnNQb5lwDQWHSNnuqM69If0W-NHMqP';
@@ -98,7 +98,7 @@ function setup() {
   }
   if (!u.getLastRow()) {
     const h = ['id', 'name', 'username', 'password', 'isAdmin', 'isActive'].concat(PAGES.map(p => 'perm_' + p), ['createdAt', 'lastLoginAt']);
-    const r = { id: 'usr-admin', name: 'Administrator', username: 'admin', password: hash_('admin123'), isAdmin: true, isActive: true, createdAt: new Date() };
+    const r = { id: 'usr-admin', name: 'Administrator', username: 'admin', password: plain_('admin123'), isAdmin: true, isActive: true, createdAt: new Date() };
     PAGES.forEach(p => r['perm_' + p] = 'full');
     u.getRange(1, 1, 1, h.length).setValues([h]).setFontWeight('bold'); u.getRange(2, 1, 1, h.length).setValues([h.map(k => r[k] === undefined ? '' : r[k])]);
   }
@@ -113,7 +113,7 @@ function resetAdminPassword() {
   if (!pr.getProperty('PW_SALT')) pr.setProperty('PW_SALT', Utilities.getUuid() + Utilities.getUuid());
   const u = users_().find(x => x.username.toLowerCase() === 'admin');
   if (!u) throw new Error('No user "admin" in Users tab.');
-  setUser_(u.row, { [usersCtx_().pw]: hash_('admin123'), isActive: true, isAdmin: true });
+  setUser_(u.row, { [usersCtx_().pw]: plain_('admin123'), isActive: true, isAdmin: true });
   try { SpreadsheetApp.getUi().alert('Admin password reset to: admin123'); } catch (e) { /* no UI */ }
 }
 
@@ -568,6 +568,11 @@ function hash_(pw) {
   const salt = PropertiesService.getScriptProperties().getProperty('PW_SALT') || '';
   return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, salt + ':' + pw, Utilities.Charset.UTF_8).map(b => ('0' + (b & 0xff).toString(16)).slice(-2)).join('');
 }
+// Passwords are stored as plain text. Leading apostrophe forces Sheets to keep it as text
+// (so "000123" stays "000123" and "=abc" is not treated as a formula).
+const plain_ = pw => "'" + String(pw);
+// Accepts plain-text passwords, and also legacy SHA-256 hashes already in the sheet.
+const pwOk_ = (stored, pw) => { const s = String(stored == null ? '' : stored); return s === pw || s.trim() === pw || s.trim() === hash_(pw); };
 const can_ = (u, pages) => u.isAdmin || pages.some(p => u.perm[p] === 'full');
 const need = (u, pages) => { if (!can_(u, pages)) throw new Error('You do not have permission for this action.'); };
 const admin_ = u => { if (!u.isAdmin) throw new Error('Admin only.'); };
@@ -577,11 +582,10 @@ function login_(p) {
   const un = String(p.username).trim().toLowerCase(), ch = CacheService.getScriptCache(), fk = 'f_' + un, pw = String(p.password);
   if (+ch.get(fk) >= 5) throw new Error('Too many failed attempts. Try again after 10 minutes.');
   const u = users_().find(x => x.username.toLowerCase() === un);
-  if (u && u.isActive && !/^[0-9a-f]{64}$/.test(String(u.pw).trim()) && String(u.pw).trim() === pw) { u.pw = hash_(pw); setUser_(u.row, { [usersCtx_().pw]: u.pw }); }
-  if (!u || !u.isActive || u.pw !== hash_(pw)) { ch.put(fk, String(+ch.get(fk) + 1), 600); throw new Error('Invalid username or password'); }
+  if (!u || !u.isActive || !pwOk_(u.pw, pw)) { ch.put(fk, String(+ch.get(fk) + 1), 600); throw new Error('Invalid username or password'); }
   ch.remove(fk); setUser_(u.row, { lastLoginAt: new Date().toISOString() });
   const token = Utilities.getUuid() + Utilities.getUuid(); ch.put('tok_' + token, u.username, 21600);
-  return { token, mustChangePassword: u.pw === hash_('admin123'), snapshot: snapshot_(users_().find(x => x.id === u.id) || u) };
+  return { token, mustChangePassword: pwOk_(u.pw, 'admin123'), snapshot: snapshot_(users_().find(x => x.id === u.id) || u) };
 }
 function auth_(token) {
   const un = token && CacheService.getScriptCache().get('tok_' + token);
@@ -609,7 +613,7 @@ function saveUser_(a, p) {
     if (!['none', 'view', 'full'].includes(v)) throw new Error('Invalid permission for ' + pg);
     vals[c.pk[pg]] = isAdmin ? 'full' : v;
   });
-  if (p.password) vals[c.pw] = hash_(String(p.password));
+  if (p.password) vals[c.pw] = plain_(p.password);
   if (!us.filter(x => x.id !== u.id).concat([u]).some(x => x.isAdmin && x.isActive)) throw new Error('At least one active admin is required');
   setUser_(ex ? ex.row : c.sh.getLastRow() + 1, vals);
 }
@@ -621,7 +625,7 @@ function deleteUser_(a, p) {
   if (!us.some(x => x.id !== u.id && x.isAdmin && x.isActive)) throw new Error('At least one active admin is required');
   usersCtx_().sh.deleteRow(u.row); _U = null;
 }
-function setPassword_(row, pw) { if (String(pw).length < 6) throw new Error('Password must be at least 6 characters'); setUser_(row, { [usersCtx_().pw]: hash_(String(pw)) }); }
+function setPassword_(row, pw) { if (String(pw).length < 6) throw new Error('Password must be at least 6 characters'); setUser_(row, { [usersCtx_().pw]: plain_(pw) }); }
 
 /* ---------------- files ---------------- */
 function getUploadFolder_() {
@@ -839,7 +843,7 @@ const ACTIONS = {
   // users
   saveUser: saveUser_, deleteUser: deleteUser_,
   resetPassword(u, p) { admin_(u); need_(p, ['id', 'newPassword']); const x = users_().find(v => v.id === p.id); if (!x) throw new Error('User not found'); setPassword_(x.row, p.newPassword); },
-  changePassword(u, p) { need_(p, ['oldPassword', 'newPassword']); if (u.pw !== hash_(String(p.oldPassword))) throw new Error('Old password is incorrect'); setPassword_(u.row, p.newPassword); },
+  changePassword(u, p) { need_(p, ['oldPassword', 'newPassword']); if (!pwOk_(u.pw, String(p.oldPassword))) throw new Error('Old password is incorrect'); setPassword_(u.row, p.newPassword); },
   uploadFile(u, p) { need_(p, ['dataUrl']); return { url: saveFile_(p.dataUrl, p.name || 'file', p.prefix || 'upload'), name: p.name || 'file' }; },
   getAll() { }
 };

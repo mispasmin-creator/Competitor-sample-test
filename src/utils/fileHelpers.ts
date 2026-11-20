@@ -1,13 +1,12 @@
 export function formatCurrency(value: number): string {
   const numeric = typeof value === 'number' && Number.isFinite(value) ? value : 0;
+  // Plain number (no currency symbol), with thousands separators.
   return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
     maximumFractionDigits: 0,
   }).format(numeric);
 }
 
-function parseAnyDate(val?: string | null): Date | null {
+export function parseAnyDate(val?: string | null): Date | null {
   if (!val) return null;
   const raw = String(val).trim();
   if (!raw || raw === '—') return null;

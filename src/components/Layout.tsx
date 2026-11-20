@@ -1,12 +1,17 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import {
+  AlertCircle,
   AlertTriangle,
   Bell,
+  Check,
   ClipboardList,
+  CornerDownLeft,
   Eye,
   EyeOff,
+  FileSearch,
   FlaskConical,
+  Info,
   KeyRound,
   LayoutDashboard,
   Loader2,
@@ -14,7 +19,9 @@ import {
   Menu,
   Moon,
   Package,
+  Plus,
   RefreshCw,
+  Search,
   Sun,
   Users,
   X,
@@ -22,20 +29,24 @@ import {
 import { useLab } from '../context/LabContext';
 import { useTheme } from '../context/ThemeContext';
 import {
+  canFullAccessPage,
   canViewPage,
-  getEffectivePagePermission,
   getPermissionSummary,
   PAGE_DEFINITIONS,
   validateOwnPasswordChangeForm,
 } from '../utils/auth';
 import { isCaseOverdue } from '../utils/labCalculations';
-import type { PageKey } from '../types/lab';
+import { CaseDetailModal } from './CaseDetailModal';
+import type { LabCase } from '../types/lab';
 
-const PAGE_ICONS: Record<PageKey, React.ReactNode> = {
-  dashboard: <LayoutDashboard className="w-4 h-4" />,
-  lostOrders: <ClipboardList className="w-4 h-4" />,
-  samples: <Package className="w-4 h-4" />,
-  testEntry: <FlaskConical className="w-4 h-4" />,
+type NavItem = { key: string; path: string; label: string; icon: React.ComponentType<{ className?: string }> };
+
+const ICONS: Record<string, NavItem['icon']> = {
+  dashboard: LayoutDashboard,
+  lostOrders: ClipboardList,
+  samples: Package,
+  testEntry: FlaskConical,
+  users: Users,
 };
 
 function getInitials(name?: string): string {
@@ -45,10 +56,15 @@ function getInitials(name?: string): string {
   return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase();
 }
 
+type JumpResult =
+  | { kind: 'page'; id: string; label: string; hint: string; path: string }
+  | { kind: 'case'; id: string; label: string; hint: string; labCase: LabCase };
+
 export function Layout({ children }: { children: React.ReactNode }) {
   const {
     currentUser,
     cases,
+    masters,
     mustChangePassword,
     refreshing,
     refreshAll,
@@ -67,71 +83,69 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const notifContainerRef = useRef<HTMLDivElement | null>(null);
 
-  const handleToggleMenu = () => {
-    if (typeof window !== 'undefined' && window.innerWidth < 1024) {
-      setMobileMenuOpen((prev) => !prev);
-    } else {
-      setDesktopCollapsed((prev) => !prev);
-    }
-  };
-
   useEffect(() => {
     setMobileMenuOpen(false);
   }, [location.pathname]);
 
-  // Change own password modal state (oldPassword + newPassword + confirmPassword)
-  const [showChangePwModal, setShowChangePwModal] = useState(false);
-  const [oldPw, setOldPw] = useState('');
-  const [newPw, setNewPw] = useState('');
-  const [confirmPw, setConfirmPw] = useState('');
-  const [showPwText, setShowPwText] = useState(false);
-  const [pwErrors, setPwErrors] = useState<Record<string, string>>({});
-  const [savingPw, setSavingPw] = useState(false);
+  useEffect(() => {
+    if (!mobileMenuOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMobileMenuOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [mobileMenuOpen]);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
-      if (
-        notifContainerRef.current &&
-        !notifContainerRef.current.contains(event.target as Node)
-      ) {
+      if (notifContainerRef.current && !notifContainerRef.current.contains(event.target as Node)) {
         setNotificationsOpen(false);
       }
     };
-    if (notificationsOpen) {
-      document.addEventListener('mousedown', handleClickOutside);
-    }
+    if (notificationsOpen) document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [notificationsOpen]);
 
-  const currentPageDef = PAGE_DEFINITIONS.find((def) => def.path === location.pathname);
+  /* ---------------- Navigation model ---------------- */
+
+  const navItems: NavItem[] = useMemo(() => {
+    const items: NavItem[] = PAGE_DEFINITIONS.filter((def) => canViewPage(currentUser, def.key)).map((def) => ({
+      key: def.key,
+      path: def.path,
+      label: def.label,
+      icon: ICONS[def.key],
+    }));
+    if (currentUser?.isAdmin) {
+      items.push({ key: 'users', path: '/users', label: 'User Management', icon: Users });
+    }
+    return items;
+  }, [currentUser]);
+
   const pageTitle =
     location.pathname === '/users'
-      ? 'User Management & Settings'
-      : currentPageDef?.title || 'Workspace';
+      ? 'User Management'
+      : PAGE_DEFINITIONS.find((d) => d.path === location.pathname)?.label || 'Workspace';
 
-  const isViewOnlyPage = Boolean(
-    currentUser &&
-      !currentUser.isAdmin &&
-      currentPageDef &&
-      getEffectivePagePermission(currentUser, currentPageDef.key) === 'view'
-  );
+  // Primary "+ New Entry" action, chosen by what the user is allowed to create.
+  const newEntry = useMemo(() => {
+    if (canFullAccessPage(currentUser, 'lostOrders')) return { path: '/lost-orders?new=1', label: 'New Lost Order' };
+    if (canFullAccessPage(currentUser, 'samples')) return { path: '/samples?new=1', label: 'Request Sample' };
+    if (currentUser?.isAdmin) return { path: '/users?new=1', label: 'Add User' };
+    return null;
+  }, [currentUser]);
 
-  const visiblePageItems = PAGE_DEFINITIONS.filter((def) =>
-    canViewPage(currentUser, def.key)
-  );
+  // Bottom pill bar: 4 nav slots around a centered FAB.
+  const bottomItems = navItems.filter((i) => i.key !== 'users').slice(0, 4);
+  const bottomSlots: Array<NavItem | null> = [...bottomItems];
+  while (bottomSlots.length < 4) bottomSlots.push(null);
 
   const userSummary = getPermissionSummary(currentUser);
   const showDefaultAdminBanner = Boolean(mustChangePassword && !bannerDismissed);
 
-  const notifications = useMemo(() => {
-    const items: Array<{
-      id: string;
-      title: string;
-      detail: string;
-      tone: 'danger' | 'warning' | 'info';
-      path?: string;
-    }> = [];
+  /* ---------------- Notifications ---------------- */
 
+  const notifications = useMemo(() => {
+    const items: Array<{ id: string; title: string; detail: string; tone: 'danger' | 'warning' | 'info'; path?: string }> = [];
     const overdueCount = cases.filter((c) => isCaseOverdue(c)).length;
     if (overdueCount > 0 && canViewPage(currentUser, 'samples')) {
       items.push({
@@ -142,10 +156,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
         path: '/samples',
       });
     }
-
-    const activeTests = cases.filter(
-      (c) => c.pendingStageNo === 4 || c.status === 'Testing'
-    ).length;
+    const activeTests = cases.filter((c) => c.pendingStageNo === 4 || c.status === 'Testing').length;
     if (activeTests > 0 && canViewPage(currentUser, 'testEntry')) {
       items.push({
         id: 'active-tests',
@@ -155,7 +166,6 @@ export function Layout({ children }: { children: React.ReactNode }) {
         path: '/test-entry',
       });
     }
-
     if (mustChangePassword) {
       items.push({
         id: 'default-pw',
@@ -164,9 +174,121 @@ export function Layout({ children }: { children: React.ReactNode }) {
         tone: 'warning',
       });
     }
-
     return items;
   }, [cases, currentUser, mustChangePassword]);
+
+  /* ---------------- Quick-jump search (Ctrl/⌘K) ---------------- */
+
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const searchWrapRef = useRef<HTMLDivElement | null>(null);
+  const [jumpQuery, setJumpQuery] = useState('');
+  const [jumpOpen, setJumpOpen] = useState(false);
+  const [jumpIndex, setJumpIndex] = useState(0);
+  const [dossierCase, setDossierCase] = useState<LabCase | null>(null);
+
+  const competitorNames = useMemo(
+    () => new Map(masters.competitors.map((c) => [c.id, c.name])),
+    [masters.competitors]
+  );
+
+  const canSeeCases = navItems.some((i) => i.key !== 'users' && i.key !== 'dashboard') || canViewPage(currentUser, 'dashboard');
+
+  const jumpResults: JumpResult[] = useMemo(() => {
+    const q = jumpQuery.trim().toLowerCase();
+    if (!q) return [];
+    const pages: JumpResult[] = navItems
+      .filter((i) => i.label.toLowerCase().includes(q))
+      .map((i) => ({ kind: 'page', id: `page-${i.key}`, label: i.label, hint: 'Go to page', path: i.path }));
+    const caseHits: JumpResult[] = canSeeCases
+      ? cases
+          .filter((c) => {
+            const comp = (competitorNames.get(c.competitorId) || c.competitorName || '').toLowerCase();
+            return (
+              c.caseId.toLowerCase().includes(q) ||
+              (c.sampleCode || '').toLowerCase().includes(q) ||
+              c.customer.toLowerCase().includes(q) ||
+              c.product.toLowerCase().includes(q) ||
+              comp.includes(q)
+            );
+          })
+          .map((c) => ({
+            kind: 'case' as const,
+            id: `case-${c.caseId}`,
+            label: `${c.caseId}${c.sampleCode ? ` · ${c.sampleCode}` : ''}`,
+            hint: `${c.customer} — ${c.product}`,
+            labCase: c,
+          }))
+      : [];
+    return [...pages, ...caseHits].slice(0, 6);
+  }, [jumpQuery, navItems, cases, canSeeCases, competitorNames]);
+
+  useEffect(() => {
+    setJumpIndex(0);
+  }, [jumpQuery]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+        setJumpOpen(true);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (searchWrapRef.current && !searchWrapRef.current.contains(e.target as Node)) setJumpOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, []);
+
+  const selectJump = useCallback(
+    (r: JumpResult) => {
+      setJumpOpen(false);
+      setJumpQuery('');
+      searchInputRef.current?.blur();
+      if (r.kind === 'page') navigate(r.path);
+      else setDossierCase(r.labCase);
+    },
+    [navigate]
+  );
+
+  const handleJumpKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setJumpOpen(true);
+      setJumpIndex((i) => Math.min(i + 1, Math.max(jumpResults.length - 1, 0)));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setJumpIndex((i) => Math.max(i - 1, 0));
+    } else if (e.key === 'Enter') {
+      const r = jumpResults[jumpIndex];
+      if (r) {
+        e.preventDefault();
+        selectJump(r);
+      }
+    } else if (e.key === 'Escape') {
+      setJumpOpen(false);
+      searchInputRef.current?.blur();
+    }
+  };
+
+  const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
+
+  /* ---------------- Change own password ---------------- */
+
+  const [showChangePwModal, setShowChangePwModal] = useState(false);
+  const [oldPw, setOldPw] = useState('');
+  const [newPw, setNewPw] = useState('');
+  const [confirmPw, setConfirmPw] = useState('');
+  const [showPwText, setShowPwText] = useState(false);
+  const [pwErrors, setPwErrors] = useState<Record<string, string>>({});
+  const [savingPw, setSavingPw] = useState(false);
 
   const openChangePwModal = () => {
     setOldPw('');
@@ -174,6 +296,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
     setConfirmPw('');
     setPwErrors({});
     setShowPwText(false);
+    setMobileMenuOpen(false);
     setShowChangePwModal(true);
   };
 
@@ -199,325 +322,349 @@ export function Layout({ children }: { children: React.ReactNode }) {
     }
   };
 
-  const renderSidebar = (isDrawer = false) => {
-    const isCollapsed = !isDrawer && desktopCollapsed;
+  const goNewEntry = () => {
+    if (newEntry) navigate(newEntry.path);
+    else {
+      searchInputRef.current?.focus();
+      setJumpOpen(true);
+    }
+  };
+
+  /* ---------------- Sidebar ---------------- */
+
+  const renderSidebar = (isDrawer: boolean) => {
+    const collapsed = !isDrawer && desktopCollapsed;
+
+    const utilityBtn =
+      'w-11 h-11 lg:w-10 lg:h-10 rounded-xl inline-flex items-center justify-center text-[#0D4F3C] dark:text-[var(--color-primary)] hover:bg-white/70 dark:hover:bg-white/5 transition-colors';
 
     return (
-      <div className={`flex flex-col h-full bg-[var(--bg-surface)] overflow-y-auto ${isDrawer ? 'w-full' : 'w-full border-r border-[var(--border-subtle)]'}`}>
+      <div className="flex flex-col h-full">
         {/* Brand */}
-        <div className={`px-4 pt-5 pb-4 flex items-center gap-3 shrink-0 ${isCollapsed ? 'justify-center' : 'justify-start'}`}>
-          <div className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0 shadow-xs overflow-hidden border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-1">
-            <img src="/image.png" alt="Logo" className="w-full h-full object-contain" />
+        <div className={`flex items-center gap-3 px-4 pt-5 pb-4 ${collapsed ? 'justify-center px-2' : ''}`}>
+          <div className="w-10 h-10 rounded-xl bg-white shadow-sm border border-white/80 p-1.5 shrink-0 overflow-hidden">
+            <img src="/image.png" alt="" className="w-full h-full object-contain" />
           </div>
-          {!isCollapsed && (
-            <div className="min-w-0">
-              <span className="font-display font-bold text-[15px] leading-tight tracking-tight text-[var(--color-primary)] block truncate">
+          {!collapsed && (
+            <div className="min-w-0 flex-1">
+              <p className="font-display font-bold text-[15px] leading-tight text-[#0D4F3C] dark:text-[var(--color-primary)] truncate">
                 Sample Lab
-              </span>
-              <span className="text-[11px] text-[var(--text-muted)] block truncate">
-                Competitor Bench
-              </span>
+              </p>
+              <p className="text-[11px] text-[var(--text-muted)] truncate">Competitor Bench</p>
             </div>
+          )}
+          {isDrawer && (
+            <button
+              type="button"
+              onClick={() => setMobileMenuOpen(false)}
+              aria-label="Close navigation menu"
+              className={utilityBtn}
+            >
+              <X className="w-5 h-5" />
+            </button>
           )}
         </div>
 
-        {/* Main Menu */}
-        <nav
-          className="flex-1 px-3 py-2 space-y-1 overflow-y-auto flex flex-col min-h-0"
-          aria-label="Main navigation"
-        >
-          <div className="space-y-1">
-            {visiblePageItems.map((item) => (
+        {/* Nav */}
+        <nav className="flex-1 min-h-0 overflow-y-auto px-3 space-y-1" aria-label="Main navigation">
+          {!collapsed && (
+            <p className="px-3 pt-2 pb-1.5 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--text-muted)]">
+              Workspace
+            </p>
+          )}
+          {navItems.map((item) => {
+            const Icon = item.icon;
+            return (
               <NavLink
                 key={item.path}
                 to={item.path}
                 end={item.path === '/'}
-                onClick={() => setMobileMenuOpen(false)}
-                title={item.label}
+                title={collapsed ? item.label : undefined}
                 className={({ isActive }) =>
-                  `flex items-center gap-3 px-2.5 py-2 rounded-[12px] text-[13px] whitespace-nowrap transition-colors ${
-                    isCollapsed ? 'justify-center' : 'justify-start'
+                  `group flex items-center gap-3 min-h-[44px] rounded-xl text-sm font-semibold transition-colors ${
+                    collapsed ? 'justify-center px-0' : 'px-3'
                   } ${
                     isActive
-                      ? 'bg-[var(--color-primary-soft)] text-[var(--color-primary)] font-semibold'
-                      : 'text-[var(--text-body)] hover:bg-[var(--bg-surface-muted)] hover:text-[var(--text-heading)] font-medium'
+                      ? 'bg-[#0D4F3C] text-white shadow-[0_6px_16px_rgba(13,79,60,0.25)]'
+                      : 'text-slate-600 dark:text-[var(--text-body)] hover:bg-white/70 dark:hover:bg-white/5'
                   }`
                 }
               >
                 {({ isActive }) => (
                   <>
-                    <span
-                      className={`w-8 h-8 rounded-[9px] flex items-center justify-center shrink-0 ${
-                        isActive
-                          ? 'bg-[var(--color-primary)] text-[var(--color-primary-fg)]'
-                          : 'text-[var(--text-muted)]'
+                    <Icon
+                      className={`w-[18px] h-[18px] shrink-0 ${
+                        isActive ? 'text-[#A3F046]' : 'text-[#0D4F3C] dark:text-[var(--color-primary)]'
                       }`}
-                    >
-                      {PAGE_ICONS[item.key]}
-                    </span>
-                    {!isCollapsed && <span className="truncate">{item.label}</span>}
+                    />
+                    {!collapsed && <span className="truncate">{item.label}</span>}
                   </>
                 )}
               </NavLink>
-            ))}
-
-            {/* User Management placed one-by-one with main pages */}
-            {currentUser?.isAdmin && (
-              <NavLink
-                to="/users"
-                onClick={() => setMobileMenuOpen(false)}
-                title="User Management"
-                className={({ isActive }) =>
-                  `flex items-center gap-3 px-2.5 py-2 rounded-[12px] text-[13px] whitespace-nowrap transition-colors ${
-                    isCollapsed ? 'justify-center' : 'justify-start'
-                  } ${
-                    isActive
-                      ? 'bg-[var(--color-primary-soft)] text-[var(--color-primary)] font-semibold'
-                      : 'text-[var(--text-body)] hover:bg-[var(--bg-surface-muted)] hover:text-[var(--text-heading)] font-medium'
-                  }`
-                }
-              >
-                {({ isActive }) => (
-                  <>
-                    <span
-                      className={`w-8 h-8 rounded-[9px] flex items-center justify-center shrink-0 ${
-                        isActive
-                          ? 'bg-[var(--color-primary)] text-[var(--color-primary-fg)]'
-                          : 'text-[var(--text-muted)]'
-                      }`}
-                    >
-                      <Users className="w-4 h-4" />
-                    </span>
-                    {!isCollapsed && <span className="truncate">User Management</span>}
-                  </>
-                )}
-              </NavLink>
-            )}
-          </div>
-
-          {/* Bottom Actions (Log out) */}
-          <div className="pt-4 mt-auto">
-            <button
-              type="button"
-              onClick={() => void signOut()}
-              aria-label="Log out"
-              title="Log out"
-              className={`w-full flex items-center gap-3 px-2.5 py-2 rounded-[12px] text-[13px] font-medium text-[var(--text-body)] hover:bg-[var(--status-danger-bg)] hover:text-[var(--status-danger-fg)] transition-colors whitespace-nowrap ${
-                isCollapsed ? 'justify-center' : 'justify-start'
-              }`}
-            >
-              <span className="w-8 h-8 rounded-[9px] flex items-center justify-center shrink-0 text-[var(--text-muted)]">
-                <LogOut className="w-4 h-4" />
-              </span>
-              {!isCollapsed && <span className="truncate">Log out</span>}
-            </button>
-          </div>
+            );
+          })}
         </nav>
 
-        {/* Sidebar Footer */}
-        <div className={`px-4 py-3 border-t border-[var(--border-subtle)] space-y-1 shrink-0 ${isCollapsed ? 'hidden' : 'block'}`}>
-          <div className="min-w-0 text-center">
-            <p className="text-xs font-semibold text-[var(--text-heading)] truncate">
-              {currentUser?.name}
-            </p>
-            <p className="text-[11px] text-[var(--text-muted)] truncate">{userSummary}</p>
+        {/* Utilities */}
+        <div className={`px-3 pt-3 ${collapsed ? 'flex flex-col items-center gap-1' : 'flex items-center justify-between'}`}>
+          <button
+            type="button"
+            onClick={() => void refreshAll()}
+            disabled={refreshing}
+            aria-label="Refresh data from Google Sheet"
+            title="Refresh data"
+            className={`${utilityBtn} disabled:opacity-60`}
+          >
+            <RefreshCw className={`w-[18px] h-[18px] ${refreshing ? 'animate-spin' : ''}`} />
+          </button>
+          <button
+            type="button"
+            onClick={toggleTheme}
+            aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+            title={isDark ? 'Light mode' : 'Dark mode'}
+            className={utilityBtn}
+          >
+            {isDark ? <Sun className="w-[18px] h-[18px]" /> : <Moon className="w-[18px] h-[18px]" />}
+          </button>
+          <button
+            type="button"
+            onClick={openChangePwModal}
+            aria-label="Change your password"
+            title="Change password"
+            className={utilityBtn}
+          >
+            <KeyRound className="w-[18px] h-[18px]" />
+          </button>
+          <button
+            type="button"
+            onClick={() => void signOut()}
+            aria-label="Log out"
+            title="Log out"
+            className={`${utilityBtn} hover:!bg-[var(--status-danger-bg)] hover:!text-[var(--status-danger-fg)]`}
+          >
+            <LogOut className="w-[18px] h-[18px]" />
+          </button>
+        </div>
+
+        {/* User badge */}
+        <div className="p-3">
+          <div
+            className={`glass rounded-2xl flex items-center gap-3 ${collapsed ? 'justify-center p-1.5' : 'p-2.5'}`}
+            title={collapsed ? `${currentUser?.name} · ${userSummary}` : undefined}
+          >
+            <span className="w-9 h-9 rounded-full bg-[#0D4F3C] text-[#A3F046] font-display font-bold text-xs flex items-center justify-center shrink-0">
+              {getInitials(currentUser?.name)}
+            </span>
+            {!collapsed && (
+              <div className="min-w-0">
+                <p className="text-[13px] font-bold text-[var(--text-heading)] truncate">{currentUser?.name}</p>
+                <p className="text-[11px] text-[var(--text-muted)] truncate">
+                  @{currentUser?.username} · {userSummary}
+                </p>
+              </div>
+            )}
           </div>
         </div>
       </div>
     );
   };
 
+  /* ---------------- Render ---------------- */
+
   return (
-    <div className="app-shell 2xl:p-3">
-      <div className="flex w-full h-full bg-[var(--bg-canvas)] 2xl:rounded-[24px] 2xl:border 2xl:border-[var(--border-subtle)] overflow-hidden shadow-none 2xl:shadow-[var(--shadow-shell)]">
-        {/* Desktop / Laptop Sidebar (toggled width 72px or 250px) */}
-        <aside className={`hidden lg:flex flex-col ${desktopCollapsed ? 'w-[72px]' : 'w-[250px]'} shrink-0 h-full transition-all duration-200 overflow-y-auto`}>
+    <>
+      <div className="min-h-dvh flex no-print">
+        {/* Desktop sidebar */}
+        <aside
+          className={`hidden lg:flex flex-col sticky top-0 h-screen shrink-0 bg-white/55 dark:bg-[rgba(15,28,25,0.6)] backdrop-blur-xl border-r border-white/70 dark:border-white/5 transition-[width] duration-200 ${
+            desktopCollapsed ? 'w-[76px]' : 'w-[248px]'
+          }`}
+        >
           {renderSidebar(false)}
         </aside>
 
-        {/* Mobile / Tablet Drawer (<1024px) */}
-        {mobileMenuOpen && (
-          <div className="fixed inset-0 z-50 lg:hidden flex">
-            <div
-              className="fixed inset-0 fin-modal-backdrop animate-in fade-in duration-200"
-              onClick={() => setMobileMenuOpen(false)}
-              aria-hidden="true"
-            />
-            <div className="relative w-[280px] max-w-[85vw] h-full z-10 shadow-2xl animate-in slide-in-from-left duration-200">
-              {renderSidebar(true)}
-            </div>
-          </div>
-        )}
+        {/* Main column */}
+        <div className="flex-1 min-w-0 flex flex-col">
+          <header className="sticky top-0 z-30 h-14 lg:h-16 bg-white/65 dark:bg-[rgba(15,28,25,0.65)] backdrop-blur-xl border-b border-white/70 dark:border-white/5 flex items-center gap-2.5 sm:gap-3 px-3 sm:px-5 lg:px-8">
+            <button
+              type="button"
+              onClick={() => {
+                // Phones/tablets: slide-over drawer. Desktop: collapse/expand the sidebar.
+                if (window.matchMedia('(min-width: 1024px)').matches) setDesktopCollapsed((v) => !v);
+                else setMobileMenuOpen(true);
+              }}
+              aria-label="Toggle navigation sidebar"
+              title="Toggle sidebar"
+              className="fin-icon-btn"
+            >
+              <Menu className="w-5 h-5" />
+            </button>
+            <span className="hidden sm:inline font-display font-bold text-[15px] lg:text-base text-[var(--text-heading)] truncate max-w-[12rem] shrink-0">
+              {pageTitle}
+            </span>
 
-        {/* Main Area */}
-        <div className="app-main">
-          {/* Top Header */}
-          <header className="app-header border-b border-[var(--border-subtle)] bg-[var(--bg-surface)] flex items-center justify-between gap-3 shrink-0">
-            <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
-              <button
-                type="button"
-                onClick={handleToggleMenu}
-                aria-label="Toggle navigation sidebar"
-                title="Toggle Sidebar"
-                className="fin-icon-btn shrink-0"
-              >
-                <Menu className="w-5 h-5" />
-              </button>
-              <div className="min-w-0">
-                <p className="font-display font-bold tracking-tight leading-tight text-[var(--text-heading)] truncate text-[clamp(0.95rem,1.5vw,1.35rem)]">
-                  Welcome to Competitor Sample Lab
-                </p>
-                <p className="text-xs text-[var(--text-muted)] mt-0.5 truncate hidden sm:block">
-                  Hi, {currentUser?.name}. Welcome back.
-                </p>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2 shrink-0">
-              <button
-                type="button"
-                onClick={() => void refreshAll()}
-                disabled={refreshing}
-                aria-label="Refresh data from Google Sheet"
-                title="Refresh data"
-                className="fin-icon-btn disabled:opacity-60"
-              >
-                <RefreshCw
-                  className={`w-[18px] h-[18px] ${refreshing ? 'animate-spin' : ''}`}
-                  aria-hidden="true"
-                />
-              </button>
-
-              <button
-                type="button"
-                onClick={toggleTheme}
-                aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
-                title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
-                className="fin-icon-btn"
-              >
-                {isDark ? (
-                  <Sun className="w-[18px] h-[18px]" aria-hidden="true" />
-                ) : (
-                  <Moon className="w-[18px] h-[18px]" aria-hidden="true" />
-                )}
-              </button>
-
-              <div className="relative" ref={notifContainerRef}>
-                <button
-                  type="button"
-                  onClick={() => setNotificationsOpen((prev) => !prev)}
-                  aria-label="Open lab notifications"
-                  aria-expanded={notificationsOpen}
-                  className="fin-icon-btn relative"
-                >
-                  <Bell className="w-[18px] h-[18px]" aria-hidden="true" />
-                  {notifications.length > 0 && (
-                    <span
-                      className="absolute top-2 right-2 w-2 h-2 rounded-full ring-2 ring-[var(--bg-surface)]"
-                      style={{ backgroundColor: 'var(--color-primary)' }}
-                      aria-hidden="true"
-                    />
-                  )}
-                </button>
-
-                {notificationsOpen && (
-                  <div className="absolute right-0 mt-2.5 w-80 max-w-[calc(100vw-2rem)] max-h-[min(26rem,70dvh)] flex flex-col fin-modal-panel p-4 z-40">
-                    <div className="flex items-center justify-between pb-2.5 mb-2.5 border-b border-[var(--border-subtle)] shrink-0">
-                      <span className="text-xs font-bold text-[var(--text-heading)]">
-                        Lab Notifications
-                      </span>
-                      <span className="text-[11px] font-medium text-[var(--text-muted)]">
-                        {notifications.length} active
-                      </span>
-                    </div>
-                    {notifications.length === 0 ? (
-                      <p className="text-xs text-[var(--text-muted)] py-3 text-center">
-                        All laboratory queues are up to date.
-                      </p>
-                    ) : (
-                      <div className="space-y-2 overflow-y-auto flex-1 min-h-0">
-                        {notifications.map((item) => {
-                          const dotColor =
-                            item.tone === 'danger'
-                              ? 'var(--status-danger-fg)'
-                              : item.tone === 'warning'
-                                ? 'var(--status-warning-fg)'
-                                : 'var(--color-primary)';
-                          return (
-                            <button
-                              key={item.id}
-                              type="button"
-                              onClick={() => {
-                                setNotificationsOpen(false);
-                                if (item.path) {
-                                  navigate(item.path);
-                                } else if (item.id === 'default-pw') {
-                                  openChangePwModal();
-                                }
-                              }}
-                              className="w-full text-left p-2.5 rounded-[12px] hover:bg-[var(--bg-surface-muted)] transition-colors flex items-start gap-2.5"
-                            >
-                              <span
-                                className="w-2 h-2 rounded-full mt-1.5 shrink-0"
-                                style={{ backgroundColor: dotColor }}
-                                aria-hidden="true"
-                              />
-                              <div className="min-w-0">
-                                <p className="text-xs font-semibold text-[var(--text-heading)]">
-                                  {item.title}
-                                </p>
-                                <p className="text-[11px] text-[var(--text-muted)] mt-0.5 leading-snug">
-                                  {item.detail}
-                                </p>
-                              </div>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              <div
-                className="w-10 h-10 rounded-full flex items-center justify-center font-bold text-xs tracking-wide shadow-[var(--shadow-card)] select-none shrink-0"
-                style={{
-                  backgroundColor: 'var(--color-primary)',
-                  color: 'var(--color-primary-fg)',
+            {/* Quick-jump search */}
+            <div ref={searchWrapRef} className="relative flex-1 min-w-0 max-w-xl mx-auto">
+              <Search
+                className="w-4 h-4 text-[var(--text-muted)] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
+                aria-hidden="true"
+              />
+              <input
+                ref={searchInputRef}
+                type="search"
+                role="combobox"
+                aria-label="Quick jump: search pages and case records"
+                aria-expanded={jumpOpen && jumpQuery.trim().length > 0}
+                aria-controls="quick-jump-list"
+                aria-autocomplete="list"
+                aria-activedescendant={jumpResults[jumpIndex] ? `qj-${jumpResults[jumpIndex].id}` : undefined}
+                value={jumpQuery}
+                onChange={(e) => {
+                  setJumpQuery(e.target.value);
+                  setJumpOpen(true);
                 }}
-                title={`${currentUser?.name} (${userSummary})`}
+                onFocus={() => setJumpOpen(true)}
+                onKeyDown={handleJumpKeyDown}
+                placeholder="Search case, sample, customer…"
+                className="fin-input w-full pl-10 pr-3 sm:pr-16 !bg-white/80 dark:!bg-white/5"
+              />
+              <kbd className="hidden sm:inline-flex absolute right-3 top-1/2 -translate-y-1/2 items-center gap-0.5 px-1.5 py-0.5 rounded-md border border-[var(--border-subtle)] bg-white/70 dark:bg-white/5 font-mono text-[10px] text-[var(--text-muted)] pointer-events-none">
+                {isMac ? '⌘' : 'Ctrl'} K
+              </kbd>
+
+              {jumpOpen && jumpQuery.trim() && (
+                <div className="absolute left-0 right-0 mt-2 rounded-2xl bg-[var(--bg-surface)] border border-[var(--border-subtle)] shadow-[var(--shadow-shell)] overflow-hidden z-40 anim-pop">
+                  {jumpResults.length === 0 ? (
+                    <p className="px-4 py-5 text-sm text-[var(--text-muted)] text-center">No matches for “{jumpQuery.trim()}”.</p>
+                  ) : (
+                    <ul id="quick-jump-list" role="listbox" aria-label="Quick jump results" className="py-1.5">
+                      {jumpResults.map((r, idx) => (
+                        <li
+                          key={r.id}
+                          id={`qj-${r.id}`}
+                          role="option"
+                          aria-selected={idx === jumpIndex}
+                          onMouseEnter={() => setJumpIndex(idx)}
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            selectJump(r);
+                          }}
+                          className={`mx-1.5 px-3 min-h-[44px] py-2 rounded-xl flex items-center gap-3 cursor-pointer ${
+                            idx === jumpIndex ? 'bg-[var(--mint)]' : ''
+                          }`}
+                        >
+                          <span className="w-8 h-8 rounded-full bg-[var(--mint)] text-[var(--color-primary)] flex items-center justify-center shrink-0">
+                            {r.kind === 'page' ? (
+                              <LayoutDashboard className="w-4 h-4" aria-hidden="true" />
+                            ) : (
+                              <FileSearch className="w-4 h-4" aria-hidden="true" />
+                            )}
+                          </span>
+                          <span className="min-w-0 flex-1">
+                            <span
+                              className={`block text-sm font-semibold text-[var(--text-heading)] truncate ${
+                                r.kind === 'case' ? 'font-mono text-[13px]' : ''
+                              }`}
+                            >
+                              {r.label}
+                            </span>
+                            <span className="block text-xs text-[var(--text-muted)] truncate">{r.hint}</span>
+                          </span>
+                          {idx === jumpIndex && (
+                            <CornerDownLeft className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" aria-hidden="true" />
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Notifications */}
+            <div className="relative shrink-0" ref={notifContainerRef}>
+              <button
+                type="button"
+                onClick={() => setNotificationsOpen((prev) => !prev)}
+                aria-label={`Notifications${notifications.length ? ` (${notifications.length})` : ''}`}
+                aria-expanded={notificationsOpen}
+                className="fin-icon-btn relative"
               >
-                {getInitials(currentUser?.name)}
-              </div>
+                <Bell className="w-[18px] h-[18px]" aria-hidden="true" />
+                {notifications.length > 0 && (
+                  <span
+                    className="absolute top-2 right-2 w-2.5 h-2.5 rounded-full bg-[#A3F046] ring-2 ring-[#0D4F3C]"
+                    aria-hidden="true"
+                  />
+                )}
+              </button>
+
+              {notificationsOpen && (
+                <div className="absolute right-0 mt-2.5 w-80 max-w-[calc(100vw-1.5rem)] max-h-[min(26rem,70dvh)] flex flex-col rounded-2xl bg-[var(--bg-surface)] border border-[var(--border-subtle)] shadow-[var(--shadow-shell)] p-3 z-40 anim-pop">
+                  <div className="flex items-center justify-between px-1.5 pb-2.5 mb-1.5 border-b border-[var(--border-subtle)]">
+                    <span className="text-sm font-bold text-[var(--text-heading)] font-display">Notifications</span>
+                    <span className="text-[11px] font-mono text-[var(--text-muted)]">{notifications.length} active</span>
+                  </div>
+                  {notifications.length === 0 ? (
+                    <p className="text-xs text-[var(--text-muted)] py-4 text-center">All laboratory queues are up to date.</p>
+                  ) : (
+                    <div className="space-y-1 overflow-y-auto flex-1 min-h-0">
+                      {notifications.map((item) => {
+                        const dot =
+                          item.tone === 'danger'
+                            ? 'var(--status-danger-fg)'
+                            : item.tone === 'warning'
+                              ? 'var(--status-warning-fg)'
+                              : 'var(--color-primary)';
+                        return (
+                          <button
+                            key={item.id}
+                            type="button"
+                            onClick={() => {
+                              setNotificationsOpen(false);
+                              if (item.path) navigate(item.path);
+                              else if (item.id === 'default-pw') openChangePwModal();
+                            }}
+                            className="w-full text-left p-2.5 min-h-[44px] rounded-xl hover:bg-[var(--bg-surface-muted)] transition-colors flex items-start gap-2.5"
+                          >
+                            <span className="w-2 h-2 rounded-full mt-1.5 shrink-0" style={{ backgroundColor: dot }} aria-hidden="true" />
+                            <span className="min-w-0">
+                              <span className="block text-xs font-semibold text-[var(--text-heading)]">{item.title}</span>
+                              <span className="block text-[11px] text-[var(--text-muted)] mt-0.5 leading-snug">{item.detail}</span>
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </header>
 
-          {/* Default Password Security Banner */}
+          {/* Default password banner */}
           {showDefaultAdminBanner && (
-            <div className="px-4 sm:px-6 pt-3 pb-1 shrink-0">
+            <div className="px-4 sm:px-6 lg:px-8 pt-4">
               <div
                 role="region"
                 aria-label="Security notice"
-                className="rounded-[16px] px-4 py-3 flex flex-wrap items-center justify-between gap-3 border"
+                className="rounded-2xl px-4 py-3 flex flex-wrap items-center justify-between gap-3 border"
                 style={{
                   backgroundColor: 'var(--status-warning-bg)',
                   color: 'var(--status-warning-fg)',
                   borderColor: 'color-mix(in srgb, var(--status-warning-fg) 25%, transparent)',
                 }}
               >
-                <div className="flex items-center gap-2.5 text-xs font-medium">
+                <div className="flex items-center gap-2.5 text-xs font-semibold">
                   <AlertTriangle className="w-4 h-4 shrink-0" aria-hidden="true" />
                   <span>Please change the default password to secure workspace access.</span>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1.5">
                   <button
                     type="button"
                     onClick={openChangePwModal}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-[10px] transition-opacity hover:opacity-90 whitespace-nowrap"
-                    style={{
-                      backgroundColor: 'var(--status-warning-fg)',
-                      color: '#FFFFFF',
-                    }}
+                    className="inline-flex items-center gap-1.5 px-3.5 h-9 text-xs font-semibold rounded-full whitespace-nowrap text-white"
+                    style={{ backgroundColor: 'var(--status-warning-fg)' }}
                   >
                     <KeyRound className="w-3.5 h-3.5" aria-hidden="true" />
                     Change Password
@@ -526,184 +673,188 @@ export function Layout({ children }: { children: React.ReactNode }) {
                     type="button"
                     onClick={() => setBannerDismissed(true)}
                     aria-label="Dismiss password warning"
-                    className="p-1.5 rounded-[10px] hover:bg-black/5"
+                    className="w-9 h-9 rounded-full inline-flex items-center justify-center hover:bg-black/5"
                   >
-                    <X className="w-3.5 h-3.5" />
+                    <X className="w-4 h-4" />
                   </button>
                 </div>
               </div>
             </div>
           )}
 
-          {/* Main Scrollable Workspace Content */}
-          <main className="app-content">
-            <div className="app-content-inner">
-              {/* Active Module Title Strip */}
-              <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
-                <div className="flex items-center gap-3 min-w-0">
-                  <h1 className="font-display font-bold tracking-tight text-[var(--text-heading)] truncate text-[clamp(1.25rem,2vw,1.75rem)]">
-                    {pageTitle}
-                  </h1>
-                  {isViewOnlyPage && (
-                    <span
-                      className="inline-flex items-center px-3 py-1 text-[11px] font-semibold rounded-full whitespace-nowrap shrink-0"
-                      style={{
-                        backgroundColor: 'var(--color-primary-soft)',
-                        color: 'var(--color-primary)',
-                      }}
-                    >
-                      View only
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              {children}
-            </div>
+          <main className="flex-1 w-full max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 pt-4 lg:pt-6 pb-24 lg:pb-8">
+            {children}
+            <footer className="mt-10 text-center">
+              <p className="text-[10.5px] tracking-wider text-[var(--text-muted)] uppercase select-none opacity-75">
+                &copy; ALL RIGHT RESERVED BY MD MLAUDDIN . 2026
+              </p>
+            </footer>
           </main>
-
-          {/* Bottom Copyright Footer */}
-          <footer className="w-full py-2.5 px-4 text-center shrink-0 border-t border-[var(--border-subtle)] bg-[var(--bg-surface)] z-30 shadow-xs">
-            <p
-              style={{ fontFamily: 'Calibri, Candara, Segoe, "Segoe UI", Arial, sans-serif' }}
-              className="text-[11px] font-bold tracking-wider text-[var(--text-heading)] uppercase select-none"
-            >
-              &copy; ALL RIGHT RESERVED BY MD MLAUDDIN . 2026
-            </p>
-          </footer>
         </div>
+
+        {/* Mobile drawer */}
+        {mobileMenuOpen && (
+          <div className="fixed inset-0 z-50 lg:hidden" role="dialog" aria-modal="true" aria-label="Navigation menu">
+            <div className="absolute inset-0 fin-modal-backdrop anim-fade" onClick={() => setMobileMenuOpen(false)} aria-hidden="true" />
+            <div className="absolute left-0 top-0 bottom-0 w-[264px] max-w-[85vw] bg-white/90 dark:bg-[rgba(15,28,25,0.94)] backdrop-blur-xl shadow-2xl pt-safe pb-safe anim-slide-left">
+              {renderSidebar(true)}
+            </div>
+          </div>
+        )}
+
+        {/* Mobile floating bottom pill bar */}
+        <nav className="lg:hidden fixed bottom-0 inset-x-0 z-40 px-4 pb-safe pointer-events-none" aria-label="Quick navigation">
+          <div className="pointer-events-auto max-w-md mx-auto rounded-full bg-[#0D4F3C] shadow-[0_12px_32px_rgba(7,51,38,0.35)] grid grid-cols-5 items-center h-16 px-2">
+            {[bottomSlots[0], bottomSlots[1], 'fab' as const, bottomSlots[2], bottomSlots[3]].map((slot, idx) => {
+              if (slot === 'fab') {
+                return (
+                  <div key="fab" className="flex justify-center">
+                    <button
+                      type="button"
+                      onClick={goNewEntry}
+                      aria-label={newEntry ? newEntry.label : 'Search records'}
+                      className="w-11 h-11 rounded-full bg-[#A3F046] text-[#073326] flex items-center justify-center shadow-[0_6px_16px_rgba(163,240,70,0.35)] active:scale-95 transition-transform"
+                    >
+                      {newEntry ? <Plus className="w-5 h-5" strokeWidth={2.6} /> : <Search className="w-5 h-5" />}
+                    </button>
+                  </div>
+                );
+              }
+              if (!slot) return <div key={`empty-${idx}`} aria-hidden="true" />;
+              const Icon = slot.icon;
+              return (
+                <NavLink
+                  key={slot.path}
+                  to={slot.path}
+                  end={slot.path === '/'}
+                  className="flex flex-col items-center justify-center gap-0.5 min-h-[44px] rounded-full"
+                >
+                  {({ isActive }) => (
+                    <>
+                      <Icon className={`w-5 h-5 ${isActive ? 'text-[#A3F046]' : 'text-white/60'}`} />
+                      <span className={`text-[10px] font-semibold leading-none ${isActive ? 'text-white' : 'text-white/60'}`}>
+                        {slot.label.split(' ')[0]}
+                      </span>
+                    </>
+                  )}
+                </NavLink>
+              );
+            })}
+          </div>
+        </nav>
       </div>
+
+      {/* Global dossier opened from quick-jump */}
+      <CaseDetailModal labCase={dossierCase} onClose={() => setDossierCase(null)} />
 
       {/* Change Own Password Modal */}
       {showChangePwModal && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center fin-modal-backdrop p-4"
+          className="fixed inset-0 z-50 flex items-center justify-center fin-modal-backdrop p-4 no-print"
           role="dialog"
           aria-modal="true"
           aria-labelledby="change-own-pw-title"
         >
-          <div className="fin-modal-panel max-w-[min(92vw,480px)] w-full max-h-[90dvh] flex flex-col overflow-hidden">
+          <div className="fin-modal-panel max-w-[min(92vw,480px)] w-full flex flex-col overflow-hidden anim-pop">
             <div className="flex items-center justify-between px-5 sm:px-6 py-4 border-b border-[var(--border-subtle)] shrink-0">
-              <h2
-                id="change-own-pw-title"
-                className="text-base font-bold text-[var(--text-heading)]"
-              >
+              <h2 id="change-own-pw-title" className="text-base font-bold text-[var(--text-heading)]">
                 Change Account Password
               </h2>
               <button
                 type="button"
                 onClick={() => setShowChangePwModal(false)}
                 aria-label="Close change password modal"
-                className="p-1.5 rounded-[10px] text-[var(--text-muted)] hover:text-[var(--text-heading)] hover:bg-[var(--bg-surface-muted)]"
+                className="w-10 h-10 rounded-full inline-flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-heading)] hover:bg-[var(--bg-surface-muted)]"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
             <form onSubmit={handleOwnPasswordSubmit} noValidate className="p-5 sm:p-6 space-y-4 overflow-y-auto flex-1 min-h-0">
-              <div>
-                <label
-                  htmlFor="own-old-pw"
-                  className="block text-xs font-semibold text-[var(--text-body)] mb-1.5"
-                >
-                  Current Password *
-                </label>
-                <input
-                  id="own-old-pw"
-                  type={showPwText ? 'text' : 'password'}
-                  value={oldPw}
-                  onChange={(e) => {
-                    setOldPw(e.target.value);
-                    setPwErrors((prev) => ({ ...prev, oldPassword: '' }));
-                  }}
-                  placeholder="Enter current password"
-                  className="fin-input w-full px-3.5 text-sm"
-                />
-                {pwErrors.oldPassword && (
-                  <p className="text-xs mt-1" style={{ color: 'var(--status-danger-fg)' }} role="alert">
-                    {pwErrors.oldPassword}
-                  </p>
-                )}
-              </div>
-
-              <div>
-                <label
-                  htmlFor="own-new-pw"
-                  className="block text-xs font-semibold text-[var(--text-body)] mb-1.5"
-                >
-                  New Password *
-                </label>
-                <div className="relative">
+              <div className="sheet-section space-y-4">
+                <div>
+                  <label htmlFor="own-old-pw" className="block text-xs font-semibold text-[var(--text-body)] mb-1.5">
+                    Current Password *
+                  </label>
                   <input
-                    id="own-new-pw"
+                    id="own-old-pw"
                     type={showPwText ? 'text' : 'password'}
-                    value={newPw}
+                    value={oldPw}
                     onChange={(e) => {
-                      setNewPw(e.target.value);
-                      setPwErrors((prev) => ({ ...prev, newPassword: '' }));
+                      setOldPw(e.target.value);
+                      setPwErrors((prev) => ({ ...prev, oldPassword: '' }));
                     }}
-                    placeholder="Min 6 characters"
-                    className="fin-input w-full px-3.5 pr-10 text-sm"
+                    placeholder="Enter current password"
+                    className="fin-input w-full px-3.5"
                   />
-                  <button
-                    type="button"
-                    onClick={() => setShowPwText((prev) => !prev)}
-                    aria-label={showPwText ? 'Hide password' : 'Show password'}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-[var(--text-muted)] hover:text-[var(--text-heading)]"
-                  >
-                    {showPwText ? (
-                      <EyeOff className="w-4 h-4" aria-hidden="true" />
-                    ) : (
-                      <Eye className="w-4 h-4" aria-hidden="true" />
-                    )}
-                  </button>
+                  {pwErrors.oldPassword && (
+                    <p className="text-xs mt-1" style={{ color: 'var(--status-danger-fg)' }} role="alert">
+                      {pwErrors.oldPassword}
+                    </p>
+                  )}
                 </div>
-                {pwErrors.newPassword && (
-                  <p className="text-xs mt-1" style={{ color: 'var(--status-danger-fg)' }} role="alert">
-                    {pwErrors.newPassword}
-                  </p>
-                )}
-              </div>
 
-              <div>
-                <label
-                  htmlFor="own-confirm-pw"
-                  className="block text-xs font-semibold text-[var(--text-body)] mb-1.5"
-                >
-                  Confirm New Password *
-                </label>
-                <input
-                  id="own-confirm-pw"
-                  type={showPwText ? 'text' : 'password'}
-                  value={confirmPw}
-                  onChange={(e) => {
-                    setConfirmPw(e.target.value);
-                    setPwErrors((prev) => ({ ...prev, confirmPassword: '' }));
-                  }}
-                  placeholder="Re-enter new password"
-                  className="fin-input w-full px-3.5 text-sm"
-                />
-                {pwErrors.confirmPassword && (
-                  <p className="text-xs mt-1" style={{ color: 'var(--status-danger-fg)' }} role="alert">
-                    {pwErrors.confirmPassword}
-                  </p>
-                )}
+                <div>
+                  <label htmlFor="own-new-pw" className="block text-xs font-semibold text-[var(--text-body)] mb-1.5">
+                    New Password *
+                  </label>
+                  <div className="relative">
+                    <input
+                      id="own-new-pw"
+                      type={showPwText ? 'text' : 'password'}
+                      value={newPw}
+                      onChange={(e) => {
+                        setNewPw(e.target.value);
+                        setPwErrors((prev) => ({ ...prev, newPassword: '' }));
+                      }}
+                      placeholder="Min 6 characters"
+                      className="fin-input w-full px-3.5 pr-12"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPwText((prev) => !prev)}
+                      aria-label={showPwText ? 'Hide password' : 'Show password'}
+                      className="absolute right-1 top-1/2 -translate-y-1/2 w-10 h-10 inline-flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-heading)]"
+                    >
+                      {showPwText ? <EyeOff className="w-4 h-4" aria-hidden="true" /> : <Eye className="w-4 h-4" aria-hidden="true" />}
+                    </button>
+                  </div>
+                  {pwErrors.newPassword && (
+                    <p className="text-xs mt-1" style={{ color: 'var(--status-danger-fg)' }} role="alert">
+                      {pwErrors.newPassword}
+                    </p>
+                  )}
+                </div>
+
+                <div>
+                  <label htmlFor="own-confirm-pw" className="block text-xs font-semibold text-[var(--text-body)] mb-1.5">
+                    Confirm New Password *
+                  </label>
+                  <input
+                    id="own-confirm-pw"
+                    type={showPwText ? 'text' : 'password'}
+                    value={confirmPw}
+                    onChange={(e) => {
+                      setConfirmPw(e.target.value);
+                      setPwErrors((prev) => ({ ...prev, confirmPassword: '' }));
+                    }}
+                    placeholder="Re-enter new password"
+                    className="fin-input w-full px-3.5"
+                  />
+                  {pwErrors.confirmPassword && (
+                    <p className="text-xs mt-1" style={{ color: 'var(--status-danger-fg)' }} role="alert">
+                      {pwErrors.confirmPassword}
+                    </p>
+                  )}
+                </div>
               </div>
 
               <div className="flex justify-end gap-2.5 pt-4 border-t border-[var(--border-subtle)]">
-                <button
-                  type="button"
-                  onClick={() => setShowChangePwModal(false)}
-                  className="fin-btn-secondary px-4 py-2 text-xs"
-                >
+                <button type="button" onClick={() => setShowChangePwModal(false)} className="fin-btn-secondary px-4 text-sm">
                   Cancel
                 </button>
-                <button
-                  type="submit"
-                  disabled={savingPw}
-                  className="fin-btn-primary px-4 py-2 text-xs inline-flex items-center gap-1.5"
-                >
-                  {savingPw && <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />}
+                <button type="submit" disabled={savingPw} className="fin-btn-primary px-4 text-sm inline-flex items-center justify-center gap-1.5">
+                  {savingPw && <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />}
                   {savingPw ? 'Saving...' : 'Save Password'}
                 </button>
               </div>
@@ -712,45 +863,44 @@ export function Layout({ children }: { children: React.ReactNode }) {
         </div>
       )}
 
-      {/* Toast Notifications */}
+      {/* Toast banners */}
       {toasts.length > 0 && (
         <div
-          className="fixed bottom-4 sm:bottom-5 right-4 sm:right-5 z-50 flex flex-col gap-2.5 max-w-[min(22rem,calc(100vw-2rem))] w-full pointer-events-none"
+          className="fixed z-[80] bottom-24 left-4 right-4 lg:bottom-5 lg:right-5 lg:left-auto lg:w-[24rem] flex flex-col gap-2 pointer-events-none no-print"
           aria-live="polite"
         >
           {toasts.slice(-3).map((toast) => {
-            const accentColor =
-              toast.type === 'error'
-                ? 'var(--status-danger-fg)'
-                : toast.type === 'success'
-                  ? 'var(--status-success-fg)'
-                  : 'var(--color-primary)';
+            const Icon = toast.type === 'error' ? AlertCircle : toast.type === 'info' ? Info : Check;
             return (
               <div
                 key={toast.id}
-                className="pointer-events-auto fin-card border border-[var(--border-subtle)] flex items-start justify-between gap-3 p-4"
-                style={{ borderLeft: `4px solid ${accentColor}` }}
                 role="status"
+                className="pointer-events-auto rounded-[1.75rem] bg-[#0D4F3C] text-white pl-2 pr-2 py-2 flex items-center gap-3 shadow-[0_12px_32px_rgba(7,51,38,0.35)] anim-pop"
               >
-                <div className="min-w-0">
-                  <p className="text-xs font-bold text-[var(--text-heading)]">{toast.title}</p>
-                  {toast.message && (
-                    <p className="text-xs text-[var(--text-muted)] mt-0.5">{toast.message}</p>
-                  )}
+                <span
+                  className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 ${
+                    toast.type === 'error' ? 'bg-rose-400/20 text-rose-200' : 'bg-[#A3F046]/15 text-[#A3F046]'
+                  }`}
+                >
+                  <Icon className="w-[18px] h-[18px]" strokeWidth={2.6} aria-hidden="true" />
+                </span>
+                <div className="min-w-0 flex-1 py-0.5">
+                  <p className="text-[13px] font-semibold leading-snug">{toast.title}</p>
+                  {toast.message && <p className="text-xs text-white/70 leading-snug mt-0.5">{toast.message}</p>}
                 </div>
                 <button
                   type="button"
                   onClick={() => dismissToast(toast.id)}
                   aria-label="Dismiss notification"
-                  className="p-1 rounded-[8px] text-[var(--text-muted)] hover:text-[var(--text-heading)] hover:bg-[var(--bg-surface-muted)] shrink-0"
+                  className="w-9 h-9 rounded-full inline-flex items-center justify-center text-white/60 hover:text-white hover:bg-white/10 shrink-0"
                 >
-                  <X className="w-3.5 h-3.5" />
+                  <X className="w-4 h-4" />
                 </button>
               </div>
             );
           })}
         </div>
       )}
-    </div>
+    </>
   );
 }

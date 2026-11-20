@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Eye,
   EyeOff,
@@ -6,15 +7,18 @@ import {
   Loader2,
   Pencil,
   Plus,
+  Search,
   Shield,
   Trash2,
   UserCheck,
+  Users as UsersIcon,
   UserX,
   X,
 } from 'lucide-react';
 import { useLab } from '../context/LabContext';
 import { formatShortDate } from '../utils/fileHelpers';
 import { Pagination } from '../components/Pagination';
+import { ConfirmDialog, EmptyState, MobileBanner, PageHeader, SegmentedTabs, toneStyle } from '../components/ui';
 import {
   canDeleteUser,
   canToggleUserActive,
@@ -49,11 +53,27 @@ export function UsersPage() {
 
   const [userPage, setUserPage] = useState(1);
   const [userPageSize, setUserPageSize] = useState(10);
+  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
+  const [userSearch, setUserSearch] = useState('');
+
+  const filteredUsers = useMemo(() => {
+    const q = userSearch.trim().toLowerCase();
+    return users.filter((u) => {
+      if (statusFilter === 'active' && !u.isActive) return false;
+      if (statusFilter === 'inactive' && u.isActive) return false;
+      if (!q) return true;
+      return u.name.toLowerCase().includes(q) || u.username.toLowerCase().includes(q);
+    });
+  }, [users, statusFilter, userSearch]);
+
+  useEffect(() => {
+    setUserPage(1);
+  }, [statusFilter, userSearch]);
 
   const paginatedUsers = useMemo(() => {
     const start = (userPage - 1) * userPageSize;
-    return users.slice(start, start + userPageSize);
-  }, [users, userPage, userPageSize]);
+    return filteredUsers.slice(start, start + userPageSize);
+  }, [filteredUsers, userPage, userPageSize]);
 
   // Add / Edit modal state
   const [showUserModal, setShowUserModal] = useState(false);
@@ -111,6 +131,17 @@ export function UsersPage() {
     setFormErrors({});
     setShowUserModal(true);
   };
+
+  // Global "+ New Entry" / FAB lands here with ?new=1
+  const [searchParams, setSearchParams] = useSearchParams();
+  useEffect(() => {
+    if (searchParams.get('new') !== '1') return;
+    openAddModal();
+    const next = new URLSearchParams(searchParams);
+    next.delete('new');
+    setSearchParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   const handleApplyPreset = (presetPermissions: UserPermissions) => {
     const next = createEmptyPermissions(pageKeys);
@@ -234,141 +265,275 @@ export function UsersPage() {
     editingUser && editingUser.isAdmin && editingUser.isActive && activeAdminCount <= 1
   );
 
-  return (
-    <div className="space-y-6">
-      {/* Header Toolbar */}
-      <div className="fin-card p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-        <div>
-          <h2 className="text-base font-bold text-[var(--text-heading)]">
-            Workspace Users ({users.length})
-          </h2>
-          <p className="text-xs text-[var(--text-muted)] mt-0.5">
-            Manage accounts, page-level permissions, and active access across the laboratory.
-          </p>
-        </div>
+  const activeCount = users.filter((u) => u.isActive).length;
+  const disabledCount = users.length - activeCount;
 
-        <button
-          type="button"
-          onClick={openAddModal}
-          className="fin-btn-primary inline-flex items-center justify-center gap-2 px-4 h-[42px] text-xs whitespace-nowrap shrink-0"
-        >
-          <Plus className="w-4 h-4" aria-hidden="true" />
-          Add User
-        </button>
+  const renderPageChips = (user: User) => {
+    if (user.isAdmin) {
+      return (
+        <span className="inline-flex items-center px-2.5 py-1 text-[11px] font-semibold rounded-full whitespace-nowrap" style={toneStyle('brand')}>
+          All {pageRows.length} pages · Admin
+        </span>
+      );
+    }
+    const rows = pageRows.filter((row) => (user.permissions?.[row.key] ?? 'none') !== 'none');
+    if (rows.length === 0) return <span className="text-xs text-[var(--text-muted)]">No pages assigned</span>;
+    return (
+      <div className="flex flex-wrap gap-1.5">
+        {rows.map((row) => {
+          const perm = user.permissions?.[row.key] ?? 'none';
+          return (
+            <span
+              key={row.key}
+              className="inline-flex items-center px-2 py-0.5 text-[11px] font-semibold rounded-full"
+              style={perm === 'full' ? toneStyle('brand') : toneStyle('neutral')}
+            >
+              {row.label} · {perm === 'full' ? 'Full' : 'View'}
+            </span>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const statusPill = (user: User) => (
+    <span
+      className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold rounded-full whitespace-nowrap"
+      style={user.isActive ? toneStyle('success') : toneStyle('neutral')}
+    >
+      <span
+        className="w-1.5 h-1.5 rounded-full"
+        style={{ backgroundColor: user.isActive ? 'var(--status-success-fg)' : 'var(--text-muted)' }}
+        aria-hidden="true"
+      />
+      {user.isActive ? 'Active' : 'Deactivated'}
+    </span>
+  );
+
+  const avatar = (user: User, size = 'w-11 h-11') => (
+    <span
+      className={`${size} rounded-full flex items-center justify-center font-display font-bold text-xs shrink-0`}
+      style={
+        user.isAdmin
+          ? { backgroundColor: '#0D4F3C', color: '#A3F046' }
+          : { backgroundColor: 'var(--mint)', color: 'var(--color-primary)' }
+      }
+    >
+      {user.name
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean)
+        .map((p, i, arr) => (i === 0 || i === arr.length - 1 ? p[0] : ''))
+        .join('')
+        .slice(0, 2)
+        .toUpperCase() || '?'}
+    </span>
+  );
+
+  return (
+    <div className="space-y-5">
+      <PageHeader
+        eyebrow="Access & Settings"
+        title="User Management"
+        actions={
+          <button type="button" onClick={openAddModal} className="fin-btn-primary inline-flex items-center gap-2 px-4 text-sm">
+            <Plus className="w-4 h-4" aria-hidden="true" />
+            Add User
+          </button>
+        }
+      />
+
+      <MobileBanner
+        label="Workspace users"
+        count={users.length}
+        caption="Accounts, page access and sign-in status"
+        onNew={openAddModal}
+        newLabel="Add"
+      />
+
+      {/* Summary strip */}
+      <section className="grid grid-cols-3 gap-2.5 sm:gap-4" aria-label="User summary">
+        {[
+          { label: 'Total', value: users.length, icon: <UsersIcon className="w-4 h-4" />, tone: 'brand' as const, filter: 'all' as const },
+          { label: 'Active', value: activeCount, icon: <UserCheck className="w-4 h-4" />, tone: 'success' as const, filter: 'active' as const },
+          { label: 'Disabled', value: disabledCount, icon: <UserX className="w-4 h-4" />, tone: 'neutral' as const, filter: 'inactive' as const },
+        ].map((s) => (
+          <button
+            key={s.label}
+            type="button"
+            onClick={() => setStatusFilter(s.filter)}
+            aria-pressed={statusFilter === s.filter}
+            className="glass rounded-2xl p-3 sm:p-4 text-left transition-shadow aria-pressed:ring-2 aria-pressed:ring-[var(--color-primary)]"
+          >
+            <span className="w-8 h-8 sm:w-10 sm:h-10 rounded-full flex items-center justify-center" style={toneStyle(s.tone)}>
+              {s.icon}
+            </span>
+            <p className="font-mono text-2xl sm:text-3xl font-bold tabular-nums text-[var(--text-heading)] mt-2 sm:mt-3 leading-none">
+              {s.value}
+            </p>
+            <p className="text-[10px] sm:text-[11px] font-bold uppercase tracking-[0.1em] text-[var(--text-muted)] mt-1">{s.label}</p>
+          </button>
+        ))}
+      </section>
+
+      {/* Filter toolbar */}
+      <div className="md:glass md:rounded-2xl md:p-3 flex flex-col sm:flex-row sm:items-center gap-3">
+        <SegmentedTabs
+          ariaLabel="Filter users by status"
+          value={statusFilter}
+          onChange={setStatusFilter}
+          options={[
+            { value: 'all', label: 'All', count: users.length },
+            { value: 'active', label: 'Active', count: activeCount },
+            { value: 'inactive', label: 'Deactivated', count: disabledCount },
+          ]}
+          className="self-start"
+        />
+        <div className="relative flex-1 min-w-0 sm:max-w-sm">
+          <Search className="w-4 h-4 text-[var(--text-muted)] absolute left-3.5 top-1/2 -translate-y-1/2" aria-hidden="true" />
+          <input
+            type="search"
+            value={userSearch}
+            onChange={(e) => setUserSearch(e.target.value)}
+            placeholder="Search name or username..."
+            aria-label="Search users"
+            className="fin-input w-full pl-10 pr-3.5"
+          />
+        </div>
       </div>
 
-      {/* Users Table */}
-      <div className="fin-card p-5 overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[640px] text-left border-collapse">
+      {/* Mobile roster cards */}
+      <div className="md:hidden space-y-3">
+        {filteredUsers.length === 0 ? (
+          <div className="feed-card">
+            <EmptyState icon={<UsersIcon className="w-5 h-5" />} title={users.length === 0 ? 'No users registered yet' : 'No matching users'} />
+          </div>
+        ) : (
+          paginatedUsers.map((user) => {
+            const toggleGuard = canToggleUserActive(user, currentUser?.id ?? '', users);
+            const deleteGuard = canDeleteUser(user, currentUser?.id ?? '', users);
+            return (
+              <article key={user.id} className="feed-card p-4">
+                <div className="flex items-center gap-3">
+                  {avatar(user)}
+                  <div className="min-w-0 flex-1">
+                    <p className="font-display text-[15px] font-bold text-[var(--text-heading)] truncate flex items-center gap-1.5">
+                      {user.name}
+                      {user.isAdmin && <Shield className="w-3.5 h-3.5 text-[var(--color-primary)] shrink-0" aria-label="Admin" />}
+                    </p>
+                    <p className="font-mono text-xs text-[var(--text-muted)] truncate">@{user.username}</p>
+                  </div>
+                  {statusPill(user)}
+                </div>
+
+                <div className="mt-3">{renderPageChips(user)}</div>
+
+                <div
+                  className="mt-3 flex items-center justify-between gap-3 rounded-xl px-3 py-2"
+                  style={{ backgroundColor: 'var(--bg-surface-muted)' }}
+                >
+                  <span className="flex items-center gap-2 min-w-0">
+                    <KeyRound className="w-4 h-4 text-[var(--color-primary)] shrink-0" aria-hidden="true" />
+                    <span className="text-xs text-[var(--text-muted)]">Password</span>
+                    <span className="font-mono text-sm tracking-widest text-[var(--text-heading)]" aria-label="Hidden">
+                      ••••••••
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => openResetModal(user)}
+                    className="text-xs font-semibold text-[var(--color-primary)] min-h-[44px] px-1"
+                  >
+                    Reset
+                  </button>
+                </div>
+
+                <p className="text-[11px] text-[var(--text-muted)] mt-2 font-mono">
+                  Last login: {user.lastLoginAt ? formatShortDate(user.lastLoginAt) : 'Never'}
+                </p>
+
+                <div className="grid grid-cols-2 gap-2 mt-3">
+                  <button
+                    type="button"
+                    onClick={() => openEditModal(user)}
+                    aria-label={`Edit ${user.name}`}
+                    className="fin-btn-primary h-11 inline-flex items-center justify-center gap-1.5 text-sm"
+                  >
+                    <Pencil className="w-4 h-4" aria-hidden="true" />
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleToggleActive(user)}
+                    disabled={!toggleGuard.allowed || togglingUserId === user.id}
+                    title={toggleGuard.allowed ? undefined : toggleGuard.reason}
+                    aria-label={`${user.isActive ? 'Deactivate' : 'Activate'} ${user.name}`}
+                    className="fin-btn-secondary h-11 inline-flex items-center justify-center gap-1.5 text-sm"
+                  >
+                    {togglingUserId === user.id ? (
+                      <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
+                    ) : user.isActive ? (
+                      <UserX className="w-4 h-4" aria-hidden="true" />
+                    ) : (
+                      <UserCheck className="w-4 h-4" aria-hidden="true" />
+                    )}
+                    {user.isActive ? 'Deactivate' : 'Activate'}
+                  </button>
+                </div>
+                {deleteGuard.allowed && (
+                  <button
+                    type="button"
+                    onClick={() => setDeleteTarget(user)}
+                    aria-label={`Delete ${user.name}`}
+                    className="w-full mt-2 h-11 rounded-xl text-sm font-semibold inline-flex items-center justify-center gap-1.5 text-[var(--status-danger-fg)] hover:bg-[var(--status-danger-bg)] transition-colors"
+                  >
+                    <Trash2 className="w-4 h-4" aria-hidden="true" />
+                    Delete user
+                  </button>
+                )}
+              </article>
+            );
+          })
+        )}
+      </div>
+
+      {/* Desktop roster table */}
+      <div className="hidden md:block fin-card p-4 lg:p-5">
+        <div className="fin-table-wrap">
+          <table className="w-full min-w-[820px] text-left border-collapse">
             <thead>
-              <tr className="fin-table-head text-[11px] font-semibold uppercase tracking-wider">
-                <th className="py-3 px-3 rounded-l-[12px] text-left whitespace-nowrap">Actions</th>
-                <th className="py-3 px-3 text-left whitespace-nowrap">Name</th>
-                <th className="py-3 px-3 text-left whitespace-nowrap">Username</th>
-                <th className="py-3 px-3 text-left whitespace-nowrap">Status</th>
-                <th className="py-3 px-3 text-left whitespace-nowrap">Pages with Access</th>
-                <th className="py-3 px-3 rounded-r-[12px] text-left whitespace-nowrap">Last Login</th>
+              <tr className="fin-table-head text-[11px] uppercase">
+                <th className="py-3 px-3 rounded-l-xl whitespace-nowrap">Name</th>
+                <th className="py-3 px-3 whitespace-nowrap">Username</th>
+                <th className="py-3 px-3 whitespace-nowrap">Status</th>
+                <th className="py-3 px-3 whitespace-nowrap">Page Access</th>
+                <th className="py-3 px-3 whitespace-nowrap">Last Login</th>
+                <th className="py-3 px-3 rounded-r-xl text-right whitespace-nowrap">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[var(--border-subtle)] text-sm">
-              {users.length === 0 ? (
+              {filteredUsers.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="py-10 text-center text-xs text-[var(--text-muted)]">
-                    No users registered yet.
+                  <td colSpan={6}>
+                    <EmptyState icon={<UsersIcon className="w-5 h-5" />} title={users.length === 0 ? 'No users registered yet' : 'No matching users'} />
                   </td>
                 </tr>
               ) : (
                 paginatedUsers.map((user) => {
-                  const toggleGuard = canToggleUserActive(
-                    user,
-                    currentUser?.id ?? '',
-                    users
-                  );
+                  const toggleGuard = canToggleUserActive(user, currentUser?.id ?? '', users);
                   const deleteGuard = canDeleteUser(user, currentUser?.id ?? '', users);
-
-                  const accessibleRows = user.isAdmin
-                    ? []
-                    : pageRows.filter((row) => (user.permissions?.[row.key] ?? 'none') !== 'none');
-
+                  const actionBtn =
+                    'w-9 h-9 rounded-full inline-flex items-center justify-center border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--color-primary)] hover:bg-[var(--mint)] disabled:opacity-35 disabled:cursor-not-allowed transition-colors';
                   return (
-                    <tr key={user.id} className="fin-table-row transition-colors">
-                      <td className="py-3.5 px-2.5 rounded-l-[12px] whitespace-nowrap align-middle">
-                        <div className="inline-flex items-center gap-1">
-                          <button
-                            type="button"
-                            onClick={() => openEditModal(user)}
-                            aria-label={`Edit ${user.name}`}
-                            title="Edit user"
-                            className="fin-btn-secondary inline-flex items-center gap-1 px-2 py-1 text-[11px] !rounded-[10px]"
-                          >
-                            <Pencil className="w-3 h-3" aria-hidden="true" />
-                            Edit
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => openResetModal(user)}
-                            aria-label={`Reset password for ${user.name}`}
-                            title="Reset password"
-                            className="fin-btn-secondary inline-flex items-center gap-1 px-2 py-1 text-[11px] !rounded-[10px]"
-                          >
-                            <KeyRound className="w-3 h-3" aria-hidden="true" />
-                            Reset Password
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => void handleToggleActive(user)}
-                            disabled={!toggleGuard.allowed || togglingUserId === user.id}
-                            title={
-                              toggleGuard.allowed
-                                ? user.isActive
-                                  ? 'Deactivate user'
-                                  : 'Activate user'
-                                : toggleGuard.reason
-                            }
-                            aria-label={`${user.isActive ? 'Deactivate' : 'Activate'} ${user.name}`}
-                            className="fin-btn-secondary inline-flex items-center gap-1 px-2 py-1 text-[11px] !rounded-[10px]"
-                          >
-                            {togglingUserId === user.id ? (
-                              <Loader2 className="w-3 h-3 animate-spin" aria-hidden="true" />
-                            ) : user.isActive ? (
-                              <>
-                                <UserX className="w-3 h-3" aria-hidden="true" />
-                                Deactivate
-                              </>
-                            ) : (
-                              <>
-                                <UserCheck className="w-3 h-3" aria-hidden="true" />
-                                Activate
-                              </>
-                            )}
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => setDeleteTarget(user)}
-                            disabled={!deleteGuard.allowed}
-                            title={deleteGuard.allowed ? 'Delete user' : deleteGuard.reason}
-                            aria-label={`Delete ${user.name}`}
-                            className="p-1.5 rounded-[10px] text-[var(--text-muted)] hover:text-[var(--status-danger-fg)] hover:bg-[var(--status-danger-bg)] disabled:opacity-35 disabled:cursor-not-allowed transition-colors"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </td>
-
-                      <td className="py-3.5 px-2.5 whitespace-nowrap">
-                        <div className="flex items-center gap-1.5">
-                          <span className="font-bold text-[var(--text-heading)]">{user.name}</span>
+                    <tr key={user.id} className="fin-table-row">
+                      <td className="py-3 px-3">
+                        <div className="flex items-center gap-3">
+                          {avatar(user, 'w-9 h-9')}
+                          <span className="font-semibold text-[var(--text-heading)] whitespace-nowrap">{user.name}</span>
                           {user.isAdmin && (
                             <span
                               className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-semibold rounded-full"
-                              style={{
-                                backgroundColor: 'var(--color-primary)',
-                                color: 'var(--color-primary-fg)',
-                              }}
+                              style={{ backgroundColor: '#0D4F3C', color: '#A3F046' }}
                             >
                               <Shield className="w-3 h-3" aria-hidden="true" />
                               Admin
@@ -376,78 +541,53 @@ export function UsersPage() {
                           )}
                         </div>
                       </td>
-
-                      <td className="py-3.5 px-2.5 font-mono text-xs text-[var(--text-body)] whitespace-nowrap">
-                        @{user.username}
-                      </td>
-
-                      <td className="py-3.5 px-2.5 whitespace-nowrap">
-                        {user.isActive ? (
-                          <span
-                            className="inline-flex items-center px-2.5 py-0.5 text-xs font-semibold rounded-full"
-                            style={{
-                              backgroundColor: 'var(--status-success-bg)',
-                              color: 'var(--status-success-fg)',
-                            }}
-                          >
-                            Active
-                          </span>
-                        ) : (
-                          <span
-                            className="inline-flex items-center px-2.5 py-0.5 text-xs font-semibold rounded-full"
-                            style={{
-                              backgroundColor: 'var(--status-neutral-bg)',
-                              color: 'var(--text-muted)',
-                            }}
-                          >
-                            Inactive
-                          </span>
-                        )}
-                      </td>
-
-                      <td className="py-3.5 px-2.5 max-w-[260px]">
-                        {user.isAdmin ? (
-                          <span
-                            className="inline-flex items-center px-2.5 py-1 text-[11px] font-semibold rounded-full whitespace-nowrap"
-                            style={{
-                              backgroundColor: 'var(--color-primary-soft)',
-                              color: 'var(--color-primary)',
-                            }}
-                          >
-                            All {pageRows.length} pages (Full) + Admin
-                          </span>
-                        ) : accessibleRows.length === 0 ? (
-                          <span className="text-xs text-[var(--text-muted)]">No pages assigned</span>
-                        ) : (
-                          <div className="flex flex-wrap gap-1.5">
-                            {accessibleRows.map((row) => {
-                              const perm = user.permissions?.[row.key] ?? 'none';
-                              return (
-                                <span
-                                  key={row.key}
-                                  className="inline-flex items-center px-2 py-0.5 text-[11px] font-semibold rounded-full"
-                                  style={
-                                    perm === 'full'
-                                      ? {
-                                          backgroundColor: 'var(--color-primary-soft)',
-                                          color: 'var(--color-primary)',
-                                        }
-                                      : {
-                                          backgroundColor: 'var(--status-neutral-bg)',
-                                          color: 'var(--status-neutral-fg)',
-                                        }
-                                  }
-                                >
-                                  {row.label} · {perm === 'full' ? 'Full' : 'View'}
-                                </span>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </td>
-
-                      <td className="py-3.5 px-2.5 rounded-r-[12px] text-xs font-mono text-[var(--text-muted)] whitespace-nowrap">
+                      <td className="py-3 px-3 font-mono text-xs text-[var(--text-body)] whitespace-nowrap">@{user.username}</td>
+                      <td className="py-3 px-3 whitespace-nowrap">{statusPill(user)}</td>
+                      <td className="py-3 px-3 max-w-[300px]">{renderPageChips(user)}</td>
+                      <td className="py-3 px-3 text-xs font-mono text-[var(--text-muted)] whitespace-nowrap">
                         {user.lastLoginAt ? formatShortDate(user.lastLoginAt) : 'Never'}
+                      </td>
+                      <td className="py-3 px-3 text-right whitespace-nowrap">
+                        <div className="inline-flex items-center gap-1.5">
+                          <button type="button" onClick={() => openEditModal(user)} aria-label={`Edit ${user.name}`} title="Edit user" className={actionBtn}>
+                            <Pencil className="w-4 h-4" aria-hidden="true" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => openResetModal(user)}
+                            aria-label={`Reset password for ${user.name}`}
+                            title="Reset password"
+                            className={actionBtn}
+                          >
+                            <KeyRound className="w-4 h-4" aria-hidden="true" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleToggleActive(user)}
+                            disabled={!toggleGuard.allowed || togglingUserId === user.id}
+                            title={toggleGuard.allowed ? (user.isActive ? 'Deactivate user' : 'Activate user') : toggleGuard.reason}
+                            aria-label={`${user.isActive ? 'Deactivate' : 'Activate'} ${user.name}`}
+                            className={actionBtn}
+                          >
+                            {togglingUserId === user.id ? (
+                              <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
+                            ) : user.isActive ? (
+                              <UserX className="w-4 h-4" aria-hidden="true" />
+                            ) : (
+                              <UserCheck className="w-4 h-4" aria-hidden="true" />
+                            )}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setDeleteTarget(user)}
+                            disabled={!deleteGuard.allowed}
+                            title={deleteGuard.allowed ? 'Delete user' : deleteGuard.reason}
+                            aria-label={`Delete ${user.name}`}
+                            className={`${actionBtn} hover:!bg-[var(--status-danger-bg)] hover:!text-[var(--status-danger-fg)]`}
+                          >
+                            <Trash2 className="w-4 h-4" aria-hidden="true" />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -456,15 +596,15 @@ export function UsersPage() {
             </tbody>
           </table>
         </div>
-
-        <Pagination
-          currentPage={userPage}
-          totalItems={users.length}
-          pageSize={userPageSize}
-          onPageChange={setUserPage}
-          onPageSizeChange={setUserPageSize}
-        />
       </div>
+
+      <Pagination
+        currentPage={userPage}
+        totalItems={filteredUsers.length}
+        pageSize={userPageSize}
+        onPageChange={setUserPage}
+        onPageSizeChange={setUserPageSize}
+      />
 
       {/* Add / Edit User Modal */}
       {showUserModal && (
@@ -931,51 +1071,32 @@ export function UsersPage() {
       )}
 
       {/* Delete User Confirmation Modal */}
-      {deleteTarget && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center fin-modal-backdrop p-4"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="delete-user-title"
-        >
-          <div className="fin-modal-panel max-w-[min(92vw,420px)] w-full overflow-hidden">
-            <div className="px-6 py-4 border-b border-[var(--border-subtle)]">
-              <h2 id="delete-user-title" className="text-base font-bold text-[var(--text-heading)]">
-                Delete User
-              </h2>
-            </div>
-            <div className="p-6 space-y-4">
-              <p className="text-sm text-[var(--text-body)]">
-                Are you sure you want to delete{' '}
-                <span className="font-bold text-[var(--text-heading)]">{deleteTarget.name}</span> (
-                <span className="font-mono text-xs">@{deleteTarget.username}</span>)? This user will
-                no longer be able to sign in.
-              </p>
-              <div className="flex justify-end gap-2.5 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setDeleteTarget(null)}
-                  className="fin-btn-secondary px-4 py-2 text-xs"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  disabled={deletingUser}
-                  onClick={() => void handleConfirmDelete()}
-                  className="px-4 py-2 text-xs font-semibold rounded-[12px] text-white transition-opacity hover:opacity-90 inline-flex items-center gap-1.5"
-                  style={{ backgroundColor: 'var(--status-danger-fg)' }}
-                >
-                  {deletingUser && (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
-                  )}
-                  {deletingUser ? 'Deleting...' : 'Delete User'}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      <ConfirmDialog
+        open={Boolean(deleteTarget)}
+        tone="danger"
+        title="Delete this user?"
+        message={
+          deleteTarget ? (
+            <>
+              <span className="font-semibold">{deleteTarget.name}</span>{' '}
+              <span className="font-mono text-xs">(@{deleteTarget.username})</span> will no longer be able to sign in.
+            </>
+          ) : undefined
+        }
+        details={
+          deleteTarget
+            ? [
+                deleteTarget.isAdmin ? 'Administrator account' : 'Standard account',
+                `Last login: ${deleteTarget.lastLoginAt ? formatShortDate(deleteTarget.lastLoginAt) : 'Never'}`,
+                'The row is removed from the Users tab. This cannot be undone.',
+              ]
+            : []
+        }
+        confirmLabel="Delete User"
+        busyLabel="Deleting..."
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={handleConfirmDelete}
+      />
     </div>
   );
 }

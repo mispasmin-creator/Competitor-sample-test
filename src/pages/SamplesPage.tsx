@@ -9,9 +9,11 @@ import {
   History,
   Image as ImageIcon,
   Loader2,
+  Package,
   PackageCheck,
   Plus,
   QrCode,
+  Search,
   Upload,
   X,
 } from 'lucide-react';
@@ -27,6 +29,7 @@ import { CaseDetailModal } from '../components/CaseDetailModal';
 import { SampleQrModal } from '../components/SampleQrModal';
 import { OverdueChip, SampleStatusBadge } from '../components/StatusBadge';
 import { Pagination } from '../components/Pagination';
+import { EmptyState, FeedCard, getCaseProgress, MobileBanner, PageHeader, SegmentedTabs } from '../components/ui';
 import type { LabCase } from '../types/lab';
 
 const DEFAULT_SOURCE_TYPES = ['Customer', 'Market-Retail Shop', 'Dealer-Distributor', 'Online', 'Other'];
@@ -138,17 +141,35 @@ export function SamplesPage() {
     return base;
   }, [activeTab, activeSamples, historySamples, receivePendingOnly]);
 
+  const [sampleSearch, setSampleSearch] = useState('');
+
+  const searchedSamples = useMemo(() => {
+    const q = sampleSearch.trim().toLowerCase();
+    if (!q) return visibleSamples;
+    return visibleSamples.filter((c) => {
+      const comp = (competitorMap.get(c.competitorId)?.name || c.competitorName || '').toLowerCase();
+      return (
+        c.caseId.toLowerCase().includes(q) ||
+        (c.sampleCode || '').toLowerCase().includes(q) ||
+        (c.sampleName || '').toLowerCase().includes(q) ||
+        c.customer.toLowerCase().includes(q) ||
+        c.product.toLowerCase().includes(q) ||
+        comp.includes(q)
+      );
+    });
+  }, [visibleSamples, sampleSearch, competitorMap]);
+
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [activeTab, receivePendingOnly]);
+  }, [activeTab, receivePendingOnly, sampleSearch]);
 
   const paginatedSamples = useMemo(() => {
     const start = (currentPage - 1) * pageSize;
-    return visibleSamples.slice(start, start + pageSize);
-  }, [visibleSamples, currentPage, pageSize]);
+    return searchedSamples.slice(start, start + pageSize);
+  }, [searchedSamples, currentPage, pageSize]);
 
   const unrequestedOrders = useMemo(
     () => cases.filter((c) => c.status === 'No Sample'),
@@ -179,6 +200,16 @@ export function SamplesPage() {
     setRequestErrors({});
     setShowAddModal(true);
   };
+
+  // Global "+ New Entry" / FAB lands here with ?new=1
+  useEffect(() => {
+    if (searchParams.get('new') !== '1') return;
+    if (canEditSamples && unrequestedOrders.length > 0) openRequestModal();
+    const next = new URLSearchParams(searchParams);
+    next.delete('new');
+    setSearchParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   const handleRequestOrderChange = (caseId: string) => {
     setSelectedCaseId(caseId);
@@ -392,113 +423,196 @@ export function SamplesPage() {
     );
   };
 
+  const viewOnly = !canEditSamples;
+  const canRequest = canEditSamples && unrequestedOrders.length > 0;
+
   return (
     <div className="space-y-5">
-      {/* View Mode Tabs: Active Samples vs History */}
-      <div className="flex items-center gap-2 border-b border-[var(--border-subtle)] pb-2">
-        <button
-          type="button"
-          onClick={() => setActiveTab('active')}
-          className={`inline-flex items-center gap-2 px-4 py-2 text-xs font-bold rounded-[12px] border transition-all ${
-            activeTab === 'active'
-              ? 'bg-[var(--color-primary-soft)] text-[var(--color-primary)] border-[var(--color-primary)] shadow-xs'
-              : 'bg-[var(--bg-surface)] text-[var(--text-muted)] border-[var(--border-subtle)] hover:text-[var(--text-heading)]'
-          }`}
-        >
-          <Clock className="w-3.5 h-3.5" />
-          <span>Active Samples</span>
-          <span className="font-mono text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--bg-surface-muted)]">
-            {activeSamples.length}
-          </span>
-        </button>
+      <PageHeader
+        eyebrow="Directory"
+        title="Sample Tracking Pipeline"
+        viewOnly={viewOnly}
+        actions={
+          canEditSamples ? (
+            <button
+              type="button"
+              onClick={openRequestModal}
+              disabled={unrequestedOrders.length === 0}
+              title={unrequestedOrders.length === 0 ? 'Every lost order already has a sample' : undefined}
+              className="fin-btn-primary inline-flex items-center gap-2 px-4 text-sm"
+            >
+              <Plus className="w-4 h-4" aria-hidden="true" />
+              Request Sample
+            </button>
+          ) : undefined
+        }
+      />
 
-        <button
-          type="button"
-          onClick={() => {
-            setActiveTab('history');
-            setReceivePendingOnly(false);
+      <MobileBanner
+        label={activeTab === 'active' ? 'Active samples' : 'Completed samples'}
+        count={searchedSamples.length}
+        caption={`${receivePendingCount} awaiting receipt · ${historySamples.length} completed`}
+        icon={<PackageCheck className="w-[18px] h-[18px]" />}
+        iconLabel={receivePendingOnly ? 'Show all active samples' : 'Show samples awaiting receipt'}
+        onIconClick={() => {
+          setActiveTab('active');
+          toggleReceivePending();
+        }}
+        onNew={canRequest ? openRequestModal : undefined}
+        newLabel="Request"
+        viewOnly={viewOnly}
+      />
+
+      {/* Filter toolbar */}
+      <div className="md:glass md:rounded-2xl md:p-3 flex flex-col lg:flex-row lg:items-center gap-3">
+        <SegmentedTabs
+          ariaLabel="Sample view"
+          value={activeTab}
+          onChange={(v) => {
+            setActiveTab(v);
+            if (v === 'history') setReceivePendingOnly(false);
           }}
-          className={`inline-flex items-center gap-2 px-4 py-2 text-xs font-bold rounded-[12px] border transition-all ${
-            activeTab === 'history'
-              ? 'bg-[var(--color-primary-soft)] text-[var(--color-primary)] border-[var(--color-primary)] shadow-xs'
-              : 'bg-[var(--bg-surface)] text-[var(--text-muted)] border-[var(--border-subtle)] hover:text-[var(--text-heading)]'
-          }`}
-        >
-          <History className="w-3.5 h-3.5" />
-          <span>History</span>
-          <span className="font-mono text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--bg-surface-muted)]">
-            {historySamples.length}
-          </span>
-        </button>
-      </div>
+          options={[
+            { value: 'active', label: 'Active', count: activeSamples.length, icon: <Clock className="w-3.5 h-3.5" /> },
+            { value: 'history', label: 'History', count: historySamples.length, icon: <History className="w-3.5 h-3.5" /> },
+          ]}
+          className="self-start"
+        />
 
-      {/* Header Toolbar */}
-      <div className="fin-card p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-3">
+        <div className="relative flex-1 min-w-0 lg:max-w-sm">
+          <Search className="w-4 h-4 text-[var(--text-muted)] absolute left-3.5 top-1/2 -translate-y-1/2" aria-hidden="true" />
+          <input
+            type="search"
+            value={sampleSearch}
+            onChange={(e) => setSampleSearch(e.target.value)}
+            placeholder="Search sample ID, case, customer..."
+            aria-label="Search samples"
+            className="fin-input w-full pl-10 pr-3.5"
+          />
+        </div>
+
+        <div className="flex items-center gap-2">
           {activeTab === 'active' && (
             <button
               type="button"
               onClick={toggleReceivePending}
               aria-pressed={receivePendingOnly}
-              className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-semibold rounded-[12px] border transition-colors whitespace-nowrap"
+              className="inline-flex items-center gap-1.5 px-3.5 h-11 text-xs font-semibold rounded-full border transition-colors whitespace-nowrap"
               style={
                 receivePendingOnly
-                  ? {
-                      backgroundColor: 'var(--color-primary-soft)',
-                      color: 'var(--color-primary)',
-                      borderColor: 'var(--color-primary)',
-                    }
-                  : {
-                      backgroundColor: 'var(--bg-surface)',
-                      color: 'var(--text-body)',
-                      borderColor: 'var(--border-subtle)',
-                    }
+                  ? { backgroundColor: 'var(--brand)', color: '#FFFFFF', borderColor: 'var(--brand)' }
+                  : { backgroundColor: 'var(--bg-surface)', color: 'var(--text-body)', borderColor: 'var(--border-subtle)' }
               }
             >
-              <span>Receive Pending</span>
-              <span className="font-mono font-bold">({receivePendingCount})</span>
+              Receive pending
+              <span className="font-mono">{receivePendingCount}</span>
             </button>
           )}
-
-          <span className="text-xs text-[var(--text-muted)] font-mono tabular-nums">
-            {activeTab === 'active' ? activeSamples.length : historySamples.length} {activeTab === 'active' ? 'active' : 'completed'} samples
-          </span>
+          {(sampleSearch || receivePendingOnly) && (
+            <button
+              type="button"
+              onClick={() => {
+                setSampleSearch('');
+                if (receivePendingOnly) toggleReceivePending();
+              }}
+              className="inline-flex items-center gap-1 px-3 h-11 text-xs font-semibold text-[var(--color-primary)] whitespace-nowrap hover:underline"
+            >
+              <X className="w-3.5 h-3.5" aria-hidden="true" />
+              Clear filters
+            </button>
+          )}
         </div>
+      </div>
 
-        {canEditSamples && (
-          <button
-            type="button"
-            onClick={openRequestModal}
-            className="fin-btn-primary inline-flex items-center justify-center gap-2 px-4 h-[42px] text-xs whitespace-nowrap shrink-0 w-full sm:w-auto"
-          >
-            <Plus className="w-4 h-4" aria-hidden="true" />
-            Request Sample
-          </button>
+      {/* Mobile: stacked detail cards */}
+      <div className="md:hidden space-y-3">
+        {searchedSamples.length === 0 ? (
+          <div className="feed-card">
+            <EmptyState
+              icon={<Package className="w-5 h-5" />}
+              title={receivePendingOnly ? 'No samples awaiting receipt' : sampleSearch ? 'No matching samples' : 'No samples here yet'}
+              hint={!sampleSearch && !receivePendingOnly && canRequest ? 'Request a sample for a lost order to start tracking it.' : undefined}
+            />
+          </div>
+        ) : (
+          paginatedSamples.map((sample) => {
+            const comp = competitorMap.get(sample.competitorId);
+            const overdue = isCaseOverdue(sample);
+            const actionsNode = renderCardActions(sample);
+            return (
+              <FeedCard
+                key={sample.caseId}
+                id={sample.sampleCode || sample.caseId}
+                title={sample.sampleName || sample.product}
+                subtitle={`${sample.caseId} · ${sample.customer}`}
+                onOpen={() => setDetailCase(sample)}
+                openLabel={`View details for ${sample.caseId}`}
+                highlight={overdue}
+                meta={[
+                  { label: 'Competitor', value: comp?.name || sample.competitorName || '—' },
+                  { label: 'Source', value: sample.sourceType || '—' },
+                  {
+                    label: overdue ? 'Overdue' : 'Due',
+                    value: (
+                      <span className="font-mono" style={overdue ? { color: 'var(--status-danger-fg)' } : undefined}>
+                        {formatShortDate(sample.pendingPlanned || sample.expectedDate) || '—'}
+                      </span>
+                    ),
+                  },
+                ]}
+                progress={getCaseProgress(sample)}
+                progressTone={overdue ? 'danger' : 'brand'}
+                footerLeft={sample.responsiblePerson || sample.sourceLocation || '—'}
+                footerRight={<SampleStatusBadge status={sample.status} />}
+                actions={
+                  <>
+                    {actionsNode}
+                    <button
+                      type="button"
+                      onClick={() => setQrCase(sample)}
+                      aria-label={`QR label for ${sample.sampleCode || sample.caseId}`}
+                      className="fin-btn-secondary h-11 inline-flex items-center justify-center gap-1.5 text-sm"
+                    >
+                      <QrCode className="w-4 h-4" aria-hidden="true" />
+                      QR Label
+                    </button>
+                  </>
+                }
+              />
+            );
+          })
         )}
       </div>
 
-      {/* Samples Table View */}
-      <div className="fin-card p-5 overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[750px] text-left border-collapse">
+      {/* Desktop: glass table */}
+      <div className="hidden md:block fin-card p-4 lg:p-5">
+        <div className="fin-table-wrap">
+          <table className="w-full min-w-[820px] text-left border-collapse">
             <thead>
-              <tr className="fin-table-head text-[11px] font-semibold uppercase tracking-wider">
-                <th className="py-3 px-4 rounded-l-[12px] text-left whitespace-nowrap">Actions</th>
-                <th className="py-3 px-4 text-left whitespace-nowrap">Sample ID</th>
-                <th className="py-3 px-4 text-left whitespace-nowrap">Sample &amp; Case</th>
-                <th className="py-3 px-4 text-left whitespace-nowrap">Competitor</th>
-                <th className="py-3 px-4 text-left whitespace-nowrap">Source &amp; Collector</th>
-                <th className="py-3 px-4 text-left whitespace-nowrap">Planned / Expected</th>
-                <th className="py-3 px-4 rounded-r-[12px] text-left whitespace-nowrap">Status</th>
+              <tr className="fin-table-head text-[11px] uppercase">
+                <th className="py-3 px-4 rounded-l-xl whitespace-nowrap">Actions</th>
+                <th className="py-3 px-4 whitespace-nowrap">Sample ID</th>
+                <th className="py-3 px-4 whitespace-nowrap">Sample &amp; Case</th>
+                <th className="py-3 px-4 whitespace-nowrap">Competitor</th>
+                <th className="py-3 px-4 whitespace-nowrap">Source &amp; Collector</th>
+                <th className="py-3 px-4 whitespace-nowrap">Planned / Expected</th>
+                <th className="py-3 px-4 rounded-r-xl whitespace-nowrap">Status</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[var(--border-subtle)] text-sm">
-              {visibleSamples.length === 0 ? (
+              {searchedSamples.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="py-10 text-center text-sm text-[var(--text-muted)]">
-                    {receivePendingOnly
-                      ? 'No samples currently awaiting receipt.'
-                      : 'No competitor samples requested yet.'}
+                  <td colSpan={7}>
+                    <EmptyState
+                      icon={<Package className="w-5 h-5" />}
+                      title={
+                        receivePendingOnly
+                          ? 'No samples currently awaiting receipt'
+                          : sampleSearch
+                            ? 'No matching samples'
+                            : 'No competitor samples here yet'
+                      }
+                    />
                   </td>
                 </tr>
               ) : (
@@ -506,87 +620,68 @@ export function SamplesPage() {
                   const comp = competitorMap.get(sample.competitorId);
                   const overdue = isCaseOverdue(sample);
                   const actionsNode = renderCardActions(sample);
-
                   return (
                     <tr
                       key={sample.caseId}
                       onClick={() => setDetailCase(sample)}
-                      className="cursor-pointer transition-colors fin-table-row"
-                      style={
-                        overdue
-                          ? { backgroundColor: 'var(--status-danger-bg)' }
-                          : undefined
-                      }
+                      className="cursor-pointer fin-table-row"
+                      style={overdue ? { backgroundColor: 'var(--status-danger-bg)' } : undefined}
                     >
-                      <td
-                        className="py-3.5 px-4 rounded-l-[12px] whitespace-nowrap align-middle"
-                        onClick={(e) => e.stopPropagation()}
-                      >
+                      <td className="py-3 px-4 whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                         <div className="inline-flex items-center gap-1.5">
                           <button
                             type="button"
                             onClick={() => setDetailCase(sample)}
                             aria-label={`View details for ${sample.caseId}`}
-                            title="View Case Details"
-                            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold rounded-lg border border-[var(--border-subtle)] bg-[var(--color-surface)] text-[var(--text-body)] hover:text-[var(--color-primary)] hover:border-[var(--color-primary)] hover:bg-[var(--color-surface-hover)] transition-all shadow-xs"
+                            title="View case details"
+                            className="w-9 h-9 rounded-full inline-flex items-center justify-center border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--color-primary)] hover:bg-[var(--mint)] transition-colors"
                           >
-                            <Eye className="w-3.5 h-3.5" aria-hidden="true" />
-                            <span>View</span>
+                            <Eye className="w-4 h-4" aria-hidden="true" />
                           </button>
                           <button
                             type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setQrCase(sample);
-                            }}
-                            aria-label={`QR Label for ${sample.sampleCode || sample.caseId}`}
-                            title="Print / View QR Code"
-                            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold rounded-lg border border-[var(--border-subtle)] bg-[var(--color-surface)] text-[var(--text-body)] hover:text-[var(--color-primary)] hover:border-[var(--color-primary)] hover:bg-[var(--color-surface-hover)] transition-all shadow-xs"
+                            onClick={() => setQrCase(sample)}
+                            aria-label={`QR label for ${sample.sampleCode || sample.caseId}`}
+                            title="Print / view QR code"
+                            className="w-9 h-9 rounded-full inline-flex items-center justify-center border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--color-primary)] hover:bg-[var(--mint)] transition-colors"
                           >
-                            <QrCode className="w-3.5 h-3.5" aria-hidden="true" />
-                            <span>QR</span>
+                            <QrCode className="w-4 h-4" aria-hidden="true" />
                           </button>
                           {actionsNode}
                         </div>
                       </td>
-                      <td className="py-3.5 px-4 font-mono text-xs font-bold text-[var(--color-primary)] whitespace-nowrap align-middle">
+                      <td className="py-3 px-4 font-mono text-xs font-bold text-[var(--color-primary)] whitespace-nowrap">
                         {sample.sampleCode || sample.caseId}
                       </td>
-                      <td className="py-3.5 px-4 align-middle">
-                        <p className="font-semibold text-[var(--text-heading)]">
-                          {sample.sampleName || sample.product}
-                        </p>
+                      <td className="py-3 px-4">
+                        <p className="font-semibold text-[var(--text-heading)] text-[13px]">{sample.sampleName || sample.product}</p>
                         <p className="text-xs text-[var(--text-muted)] font-mono">
                           {sample.caseId} · {sample.customer}
                         </p>
                       </td>
-                      <td className="py-3.5 px-4 text-[var(--text-body)] whitespace-nowrap align-middle">
+                      <td className="py-3 px-4 text-[13px] text-[var(--text-body)] whitespace-nowrap">
                         {comp?.name || sample.competitorName || '—'}
                       </td>
-                      <td className="py-3.5 px-4 text-xs text-[var(--text-muted)] max-w-xs align-middle">
-                        <p className="font-semibold text-[var(--text-heading)]">
-                          {sample.sourceType || '—'}
-                        </p>
+                      <td className="py-3 px-4 text-xs text-[var(--text-muted)] max-w-xs">
+                        <p className="font-semibold text-[var(--text-heading)]">{sample.sourceType || '—'}</p>
                         <p className="truncate">
                           {sample.sourceLocation || '—'}
                           {sample.responsiblePerson ? ` · ${sample.responsiblePerson}` : ''}
                         </p>
                       </td>
                       <td
-                        className="py-3.5 px-4 text-xs font-mono whitespace-nowrap align-middle"
+                        className="py-3 px-4 text-xs font-mono whitespace-nowrap"
                         style={{
                           color: overdue ? 'var(--status-danger-fg)' : 'var(--text-muted)',
                           fontWeight: overdue ? 700 : 500,
                         }}
                       >
-                        <div>
-                          {formatShortDate(sample.pendingPlanned || sample.expectedDate)}
-                        </div>
+                        <div>{formatShortDate(sample.pendingPlanned || sample.expectedDate)}</div>
                         <div className="mt-1">
                           <OverdueChip delayDays={sample.pendingDelay} />
                         </div>
                       </td>
-                      <td className="py-3.5 px-4 rounded-r-[12px] whitespace-nowrap align-middle">
+                      <td className="py-3 px-4 whitespace-nowrap">
                         <SampleStatusBadge status={sample.status} />
                       </td>
                     </tr>
@@ -596,15 +691,15 @@ export function SamplesPage() {
             </tbody>
           </table>
         </div>
-
-        <Pagination
-          currentPage={currentPage}
-          totalItems={visibleSamples.length}
-          pageSize={pageSize}
-          onPageChange={setCurrentPage}
-          onPageSizeChange={setPageSize}
-        />
       </div>
+
+      <Pagination
+        currentPage={currentPage}
+        totalItems={searchedSamples.length}
+        pageSize={pageSize}
+        onPageChange={setCurrentPage}
+        onPageSizeChange={setPageSize}
+      />
 
       {/* Request Competitor Sample Modal */}
       {showAddModal && (

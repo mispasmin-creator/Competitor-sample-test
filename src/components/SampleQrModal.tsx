@@ -1,3 +1,4 @@
+import { createPortal } from 'react-dom';
 import { QRCodeSVG } from 'qrcode.react';
 import { Printer, X } from 'lucide-react';
 import type { Competitor, LabCase } from '../types/lab';
@@ -29,9 +30,9 @@ export function SampleQrModal({ labCase, competitor, onClose }: SampleQrModalPro
     receivedDate: labCase.actual3,
   });
 
-  return (
+  return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 fin-modal-backdrop"
+      className="fixed inset-0 z-[60] flex items-center justify-center p-4 fin-modal-backdrop print-area"
       role="dialog"
       aria-modal="true"
       aria-labelledby="qr-modal-title"
@@ -100,7 +101,7 @@ export function SampleQrModal({ labCase, competitor, onClose }: SampleQrModalPro
         </div>
 
         <div
-          className="flex items-center justify-end gap-2.5 px-6 py-4 border-t shrink-0"
+          className="flex items-center justify-end gap-2.5 px-6 py-4 border-t shrink-0 no-print pb-safe"
           style={{ borderColor: 'var(--border-subtle)', backgroundColor: 'var(--bg-surface-muted)' }}
         >
           <button
@@ -120,6 +121,7 @@ export function SampleQrModal({ labCase, competitor, onClose }: SampleQrModalPro
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

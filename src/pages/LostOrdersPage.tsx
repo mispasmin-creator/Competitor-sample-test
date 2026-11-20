@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Clock, Eye, FlaskConical, History, Loader2, Plus, Search, Trash2, X } from 'lucide-react';
+import { Clock, Download, Eye, FlaskConical, History, Inbox, Loader2, Plus, Search, Trash2, X } from 'lucide-react';
 import { useLab } from '../context/LabContext';
 import { canFullAccessPage } from '../utils/auth';
 import { formatCurrency, formatDateTime, formatShortDate } from '../utils/fileHelpers';
@@ -13,6 +13,15 @@ import {
 import { CaseDetailModal } from '../components/CaseDetailModal';
 import { LossReasonText, OverdueChip, SampleStatusBadge } from '../components/StatusBadge';
 import { Pagination } from '../components/Pagination';
+import {
+  ConfirmDialog,
+  EmptyState,
+  FeedCard,
+  getCaseProgress,
+  MobileBanner,
+  PageHeader,
+  SegmentedTabs,
+} from '../components/ui';
 import type { LabCase } from '../types/lab';
 
 const DEFAULT_LOSS_REASONS = ['Price', 'Quality', 'Delivery', 'Other'];
@@ -78,6 +87,7 @@ export function LostOrdersPage() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submittingOrder, setSubmittingOrder] = useState(false);
   const [deletingCaseId, setDeletingCaseId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<LabCase | null>(null);
 
   // Request Sample modal state
   const [requestOrder, setRequestOrder] = useState<LabCase | null>(null);
@@ -201,6 +211,16 @@ export function LostOrdersPage() {
     setErrors({});
     setShowAddModal(true);
   };
+
+  // Global "+ New Entry" / FAB lands here with ?new=1
+  useEffect(() => {
+    if (searchParams.get('new') !== '1') return;
+    if (canEditLostOrders) openModal();
+    const next = new URLSearchParams(searchParams);
+    next.delete('new');
+    setSearchParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   const openRequestSampleModal = (order: LabCase) => {
     setRequestOrder(order);
@@ -340,71 +360,116 @@ export function LostOrdersPage() {
     }
   };
 
+  const viewOnly = !canEditLostOrders;
+  const hasFilters = Boolean(search || competitorFilter !== 'all' || reasonFilter !== 'all' || pendingOnly);
+
+  const clearFilters = () => {
+    setSearch('');
+    setCompetitorFilter('all');
+    setReasonFilter('all');
+    if (pendingOnly) {
+      setPendingOnly(false);
+      setSearchParams({});
+    }
+  };
+
+  const compLabel = (order: LabCase) =>
+    competitorMap.get(order.competitorId) ||
+    order.competitorName ||
+    (typeof order.competitor === 'string' ? order.competitor : '') ||
+    '—';
+
+  const handleExportCsv = () => {
+    const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const headers = ['Case ID', 'Date Lost', 'Customer', 'Product', 'Category', 'Order Value', 'Competitor', 'Loss Reason', 'Status', 'Notes'];
+    const rows = filteredOrders.map((o) =>
+      [o.caseId, o.dateLost || o.orderDate, o.customer, o.product, o.category, o.orderValue, compLabel(o), o.lossReason, o.status, o.orderNotes]
+        .map(esc)
+        .join(',')
+    );
+    const blob = new Blob([[headers.join(','), ...rows].join('\n')], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `lost-orders-${activeTab}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="space-y-5">
-      {/* View Mode Tabs: Active Orders vs History */}
-      <div className="flex items-center gap-2 border-b border-[var(--border-subtle)] pb-2">
-        <button
-          type="button"
-          onClick={() => {
-            setActiveTab('active');
+      <PageHeader
+        eyebrow="Directory"
+        title="Lost Orders Registry"
+        viewOnly={viewOnly}
+        actions={
+          <>
+            <button
+              type="button"
+              onClick={handleExportCsv}
+              disabled={filteredOrders.length === 0}
+              className="fin-btn-secondary inline-flex items-center gap-2 px-4 text-sm"
+            >
+              <Download className="w-4 h-4" aria-hidden="true" />
+              Export
+            </button>
+            {canEditLostOrders && (
+              <button type="button" onClick={openModal} className="fin-btn-primary inline-flex items-center gap-2 px-4 text-sm">
+                <Plus className="w-4 h-4" aria-hidden="true" />
+                New Lost Order
+              </button>
+            )}
+          </>
+        }
+      />
+
+      <MobileBanner
+        label={activeTab === 'active' ? 'Active lost orders' : 'Processed orders'}
+        count={filteredOrders.length}
+        caption={`${activeOrdersCount} active · ${historyOrdersCount} with samples`}
+        icon={<Download className="w-[18px] h-[18px]" />}
+        iconLabel="Export CSV"
+        onIconClick={handleExportCsv}
+        onNew={canEditLostOrders ? openModal : undefined}
+        viewOnly={viewOnly}
+      />
+
+      {/* Filter toolbar */}
+      <div className="md:glass md:rounded-2xl md:p-3 flex flex-col xl:flex-row xl:items-center gap-3">
+        <SegmentedTabs
+          ariaLabel="Order view"
+          value={activeTab}
+          onChange={(v) => {
+            setActiveTab(v);
+            if (v === 'history') setPendingOnly(false);
           }}
-          className={`inline-flex items-center gap-2 px-4 py-2 text-xs font-bold rounded-[12px] border transition-all ${
-            activeTab === 'active'
-              ? 'bg-[var(--color-primary-soft)] text-[var(--color-primary)] border-[var(--color-primary)] shadow-xs'
-              : 'bg-[var(--bg-surface)] text-[var(--text-muted)] border-[var(--border-subtle)] hover:text-[var(--text-heading)]'
-          }`}
-        >
-          <Clock className="w-3.5 h-3.5" />
-          <span>Active Orders</span>
-          <span className="font-mono text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--bg-surface-muted)]">
-            {activeOrdersCount}
-          </span>
-        </button>
+          options={[
+            { value: 'active', label: 'Active', count: activeOrdersCount, icon: <Clock className="w-3.5 h-3.5" /> },
+            { value: 'history', label: 'History', count: historyOrdersCount, icon: <History className="w-3.5 h-3.5" /> },
+          ]}
+          className="self-start"
+        />
 
-        <button
-          type="button"
-          onClick={() => {
-            setActiveTab('history');
-            setPendingOnly(false);
-          }}
-          className={`inline-flex items-center gap-2 px-4 py-2 text-xs font-bold rounded-[12px] border transition-all ${
-            activeTab === 'history'
-              ? 'bg-[var(--color-primary-soft)] text-[var(--color-primary)] border-[var(--color-primary)] shadow-xs'
-              : 'bg-[var(--bg-surface)] text-[var(--text-muted)] border-[var(--border-subtle)] hover:text-[var(--text-heading)]'
-          }`}
-        >
-          <History className="w-3.5 h-3.5" />
-          <span>History</span>
-          <span className="font-mono text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--bg-surface-muted)]">
-            {historyOrdersCount}
-          </span>
-        </button>
-      </div>
+        <div className="relative flex-1 min-w-0 xl:max-w-xs">
+          <Search className="w-4 h-4 text-[var(--text-muted)] absolute left-3.5 top-1/2 -translate-y-1/2" aria-hidden="true" />
+          <input
+            type="search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search customer, product, case ID..."
+            aria-label="Search lost orders"
+            className="fin-input w-full pl-10 pr-3.5"
+          />
+        </div>
 
-      {/* Toolbar */}
-      <div className="fin-card p-5 flex flex-col xl:flex-row xl:items-center justify-between gap-3">
-        <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-3 flex-1">
-          <div className="relative flex-1 min-w-[200px] max-w-sm">
-            <Search
-              className="w-4 h-4 text-[var(--text-muted)] absolute left-3.5 top-1/2 -translate-y-1/2"
-              aria-hidden="true"
-            />
-            <input
-              type="search"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search customer, product, case ID..."
-              aria-label="Search lost orders"
-              className="fin-input w-full pl-10 pr-3.5 text-sm"
-            />
-          </div>
-
+        <div className="flex items-center gap-2 overflow-x-auto scrollbar-none -mx-4 px-4 md:mx-0 md:px-0">
           <select
             value={competitorFilter}
             onChange={(e) => setCompetitorFilter(e.target.value)}
             aria-label="Filter by competitor"
-            className="fin-input px-3.5 text-sm"
+            className="fin-input px-3 shrink-0 max-w-[12rem]"
           >
             <option value="all">All Competitors</option>
             {masters.competitors.map((c) => (
@@ -418,9 +483,9 @@ export function LostOrdersPage() {
             value={reasonFilter}
             onChange={(e) => setReasonFilter(e.target.value)}
             aria-label="Filter by loss reason"
-            className="fin-input px-3.5 text-sm"
+            className="fin-input px-3 shrink-0"
           >
-            <option value="all">All Loss Reasons</option>
+            <option value="all">All Reasons</option>
             {lossReasonOptions.map((r) => (
               <option key={r} value={r}>
                 {r}
@@ -433,90 +498,138 @@ export function LostOrdersPage() {
               type="button"
               onClick={togglePendingOnly}
               aria-pressed={pendingOnly}
-              className="inline-flex items-center gap-2 px-3.5 h-[42px] text-xs font-semibold rounded-[12px] border transition-colors whitespace-nowrap"
+              className="inline-flex items-center gap-1.5 px-3.5 h-11 text-xs font-semibold rounded-full border transition-colors whitespace-nowrap shrink-0"
               style={
                 pendingOnly
-                  ? {
-                      backgroundColor: 'var(--color-primary-soft)',
-                      color: 'var(--color-primary)',
-                      borderColor: 'var(--color-primary)',
-                    }
-                  : {
-                      backgroundColor: 'var(--bg-surface)',
-                      color: 'var(--text-body)',
-                      borderColor: 'var(--border-subtle)',
-                    }
+                  ? { backgroundColor: 'var(--brand)', color: '#FFFFFF', borderColor: 'var(--brand)' }
+                  : { backgroundColor: 'var(--bg-surface)', color: 'var(--text-body)', borderColor: 'var(--border-subtle)' }
               }
             >
-              <span>Sample Request Pending</span>
-              <span className="font-mono font-bold">({stage2PendingCount})</span>
+              Request pending
+              <span className="font-mono">{stage2PendingCount}</span>
+            </button>
+          )}
+
+          {hasFilters && (
+            <button
+              type="button"
+              onClick={clearFilters}
+              className="inline-flex items-center gap-1 px-3 h-11 text-xs font-semibold text-[var(--color-primary)] whitespace-nowrap shrink-0 hover:underline"
+            >
+              <X className="w-3.5 h-3.5" aria-hidden="true" />
+              Clear filters
             </button>
           )}
         </div>
+      </div>
 
-        {canEditLostOrders && (
-          <button
-            type="button"
-            onClick={openModal}
-            className="fin-btn-primary inline-flex items-center justify-center gap-2 px-4 h-[42px] text-xs whitespace-nowrap w-full sm:w-auto shrink-0"
-          >
-            <Plus className="w-4 h-4" aria-hidden="true" />
-            Add Lost Order
-          </button>
+      {/* Mobile: stacked detail cards */}
+      <div className="md:hidden space-y-3">
+        {filteredOrders.length === 0 ? (
+          <div className="feed-card">
+            <EmptyState
+              icon={<Inbox className="w-5 h-5" />}
+              title={pendingOnly ? 'No sample requests pending' : 'No matching lost orders'}
+              hint={hasFilters ? 'Try clearing the filters.' : undefined}
+            />
+          </div>
+        ) : (
+          paginatedOrders.map((order) => {
+            const hasSample = order.status !== 'No Sample';
+            return (
+              <FeedCard
+                key={order.caseId}
+                id={order.caseId}
+                title={order.customer}
+                subtitle={`${order.product}${order.category ? ` · ${order.category}` : ''}`}
+                onOpen={() => setDetailCase(order)}
+                openLabel={`View details for ${order.caseId}`}
+                highlight={isCaseOverdue(order)}
+                meta={[
+                  { label: 'Value', value: <span className="font-mono">{formatCurrency(order.orderValue)}</span> },
+                  { label: 'Competitor', value: compLabel(order) },
+                  { label: 'Reason', value: <LossReasonText reason={order.lossReason} /> },
+                ]}
+                progress={getCaseProgress(order)}
+                progressTone={isCaseOverdue(order) ? 'danger' : 'brand'}
+                footerLeft={formatShortDate(order.dateLost || order.orderDate) || '—'}
+                footerRight={hasSample ? <SampleStatusBadge status={order.status} /> : <SampleStatusBadge status="No Sample" />}
+                actions={
+                  canEditLostOrders ? (
+                    <>
+                      {!hasSample && (
+                        <button
+                          type="button"
+                          onClick={() => openRequestSampleModal(order)}
+                          className="fin-btn-primary h-11 inline-flex items-center justify-center gap-1.5 text-sm"
+                        >
+                          <FlaskConical className="w-4 h-4" aria-hidden="true" />
+                          Request
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setDeleteTarget(order)}
+                        className="fin-btn-secondary h-11 inline-flex items-center justify-center gap-1.5 text-sm !text-[var(--status-danger-fg)]"
+                      >
+                        <Trash2 className="w-4 h-4" aria-hidden="true" />
+                        Delete
+                      </button>
+                    </>
+                  ) : undefined
+                }
+              />
+            );
+          })
         )}
       </div>
 
-      {/* Table */}
-      <div className="fin-card p-5 overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="min-w-[1250px] w-full text-left border-collapse">
+      {/* Desktop: glass table */}
+      <div className="hidden md:block fin-card p-4 lg:p-5">
+        <div className="fin-table-wrap">
+          <table className="min-w-[1180px] w-full text-left border-collapse">
             <thead>
-              <tr className="fin-table-head text-[11px] font-semibold uppercase tracking-wider">
-                <th className="py-3 px-3 rounded-l-[12px] text-left whitespace-nowrap">Actions</th>
-                <th className="py-3 px-3 text-left whitespace-nowrap">Timestamp</th>
-                <th className="py-3 px-3 text-left whitespace-nowrap">Case ID</th>
-                <th className="py-3 px-3 text-left whitespace-nowrap">Customer</th>
-                <th className="py-3 px-3 text-left whitespace-nowrap">Product</th>
-                <th className="py-3 px-3 text-left whitespace-nowrap">Category</th>
+              <tr className="fin-table-head text-[11px] uppercase">
+                <th className="py-3 px-3 rounded-l-xl whitespace-nowrap">Actions</th>
+                <th className="py-3 px-3 whitespace-nowrap">Case ID</th>
+                <th className="py-3 px-3 whitespace-nowrap">Customer</th>
+                <th className="py-3 px-3 whitespace-nowrap">Product</th>
+                <th className="py-3 px-3 whitespace-nowrap">Category</th>
                 <th className="py-3 px-3 text-right whitespace-nowrap">Order Value</th>
-                <th className="py-3 px-3 text-left whitespace-nowrap">Competitor</th>
-                <th className="py-3 px-3 text-left whitespace-nowrap">Loss Reason</th>
-                <th className="py-3 px-3 text-left whitespace-nowrap">Order Notes</th>
-                <th className="py-3 px-3 rounded-r-[12px] text-left whitespace-nowrap">Date Lost</th>
+                <th className="py-3 px-3 whitespace-nowrap">Competitor</th>
+                <th className="py-3 px-3 whitespace-nowrap">Loss Reason</th>
+                <th className="py-3 px-3 whitespace-nowrap">Notes</th>
+                <th className="py-3 px-3 whitespace-nowrap">Date Lost</th>
+                <th className="py-3 px-3 rounded-r-xl whitespace-nowrap">Logged</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[var(--border-subtle)] text-[13px]">
               {filteredOrders.length === 0 ? (
                 <tr>
-                  <td colSpan={11} className="py-10 text-center text-xs text-[var(--text-muted)]">
-                    {pendingOnly ? 'No sample requests pending.' : 'No matching lost orders found.'}
+                  <td colSpan={11}>
+                    <EmptyState
+                      icon={<Inbox className="w-5 h-5" />}
+                      title={pendingOnly ? 'No sample requests pending' : 'No matching lost orders'}
+                      hint={hasFilters ? 'Try clearing the filters.' : undefined}
+                    />
                   </td>
                 </tr>
               ) : (
                 paginatedOrders.map((order) => {
                   const hasSample = order.status !== 'No Sample';
                   return (
-                    <tr
-                      key={order.caseId}
-                      onClick={() => setDetailCase(order)}
-                      className="fin-table-row transition-colors cursor-pointer"
-                    >
-                      <td
-                        className="py-3.5 px-3 rounded-l-[12px] whitespace-nowrap align-middle"
-                        onClick={(e) => e.stopPropagation()}
-                      >
+                    <tr key={order.caseId} onClick={() => setDetailCase(order)} className="fin-table-row cursor-pointer">
+                      <td className="py-3 px-3 whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                         <div className="inline-flex items-center gap-1.5">
                           <button
                             type="button"
                             onClick={() => setDetailCase(order)}
                             aria-label={`View details for ${order.caseId}`}
-                            title="View Case Details"
-                            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold rounded-lg border border-[var(--border-subtle)] bg-[var(--color-surface)] text-[var(--text-body)] hover:text-[var(--color-primary)] hover:border-[var(--color-primary)] hover:bg-[var(--color-surface-hover)] transition-all shadow-xs"
+                            title="View case details"
+                            className="w-9 h-9 rounded-full inline-flex items-center justify-center border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--color-primary)] hover:bg-[var(--mint)] transition-colors"
                           >
-                            <Eye className="w-3.5 h-3.5" aria-hidden="true" />
-                            <span>View</span>
+                            <Eye className="w-4 h-4" aria-hidden="true" />
                           </button>
-
                           {hasSample ? (
                             <SampleStatusBadge status={order.status} />
                           ) : canEditLostOrders ? (
@@ -524,71 +637,67 @@ export function LostOrdersPage() {
                               type="button"
                               onClick={() => openRequestSampleModal(order)}
                               title="Request competitor sample for benchmarking"
-                              className="fin-btn-primary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg shadow-xs transition-all hover:opacity-95"
+                              className="fin-btn-primary !min-h-9 h-9 inline-flex items-center gap-1.5 px-3 text-xs !rounded-full"
                             >
                               <FlaskConical className="w-3.5 h-3.5" aria-hidden="true" />
-                              <span>Request Sample</span>
+                              Request Sample
                             </button>
                           ) : (
                             <span className="text-xs text-[var(--text-muted)] px-2">No sample</span>
                           )}
-
                           {canEditLostOrders && (
                             <button
                               type="button"
                               disabled={deletingCaseId === order.caseId}
-                              onClick={() => void handleDeleteOrder(order.caseId)}
+                              onClick={() => setDeleteTarget(order)}
                               aria-label={`Delete lost order ${order.caseId}`}
-                              title="Delete Order"
-                              className="inline-flex items-center justify-center p-1.5 rounded-lg border border-[var(--border-subtle)] text-[var(--text-muted)] hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 hover:border-rose-300 dark:hover:border-rose-800 disabled:opacity-50 transition-all shadow-xs"
+                              title="Delete order"
+                              className="w-9 h-9 rounded-full inline-flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--status-danger-fg)] hover:bg-[var(--status-danger-bg)] disabled:opacity-50 transition-colors"
                             >
                               {deletingCaseId === order.caseId ? (
-                                <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
+                                <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
                               ) : (
-                                <Trash2 className="w-3.5 h-3.5" />
+                                <Trash2 className="w-4 h-4" aria-hidden="true" />
                               )}
                             </button>
                           )}
                         </div>
                       </td>
-                      <td className="py-3.5 px-3 font-mono text-xs text-[var(--text-muted)] whitespace-nowrap align-middle">
-                        {order.timestamp ? formatDateTime(order.timestamp) : '—'}
-                      </td>
-                      <td className="py-3.5 px-3 font-mono font-bold text-xs text-[var(--color-primary)] whitespace-nowrap align-middle">
+                      <td className="py-3 px-3 font-mono font-bold text-xs text-[var(--color-primary)] whitespace-nowrap">
                         {order.caseId}
                       </td>
-                      <td className="py-3.5 px-3 max-w-[160px] align-middle">
+                      <td className="py-3 px-3 max-w-[170px]">
                         <p className="font-semibold text-[var(--text-heading)] truncate" title={order.customer}>
                           {order.customer}
                         </p>
                       </td>
-                      <td className="py-3.5 px-3 max-w-[160px] align-middle">
-                        <p className="text-[var(--text-heading)] font-medium truncate" title={order.product}>
+                      <td className="py-3 px-3 max-w-[170px]">
+                        <p className="text-[var(--text-heading)] truncate" title={order.product}>
                           {order.product}
                         </p>
                       </td>
-                      <td className="py-3.5 px-3 text-xs text-[var(--text-muted)] max-w-[140px] truncate align-middle" title={order.category}>
+                      <td className="py-3 px-3 text-xs text-[var(--text-muted)] max-w-[140px] truncate" title={order.category}>
                         {order.category || '—'}
                       </td>
-                      <td className="py-3.5 px-3 text-right font-mono tabular-nums font-bold text-[var(--text-heading)] whitespace-nowrap align-middle">
+                      <td className="py-3 px-3 text-right font-mono tabular-nums font-bold text-[var(--text-heading)] whitespace-nowrap">
                         {formatCurrency(order.orderValue)}
                       </td>
-                      <td
-                        className="py-3.5 px-3 text-[var(--text-body)] max-w-[140px] truncate align-middle"
-                        title={competitorMap.get(order.competitorId) || order.competitorName || (typeof order.competitor === 'string' ? order.competitor : '') || ''}
-                      >
-                        {competitorMap.get(order.competitorId) || order.competitorName || (typeof order.competitor === 'string' ? order.competitor : '') || '—'}
+                      <td className="py-3 px-3 text-[var(--text-body)] max-w-[140px] truncate" title={compLabel(order)}>
+                        {compLabel(order)}
                       </td>
-                      <td className="py-3.5 px-3 whitespace-nowrap align-middle">
+                      <td className="py-3 px-3 whitespace-nowrap">
                         <LossReasonText reason={order.lossReason} />
                       </td>
-                      <td className="py-3.5 px-3 max-w-[180px] align-middle">
+                      <td className="py-3 px-3 max-w-[180px]">
                         <p className="text-xs text-[var(--text-muted)] line-clamp-1" title={order.orderNotes}>
                           {order.orderNotes || '—'}
                         </p>
                       </td>
-                      <td className="py-3.5 px-3 rounded-r-[12px] text-xs font-mono text-[var(--text-muted)] whitespace-nowrap align-middle">
+                      <td className="py-3 px-3 text-xs font-mono text-[var(--text-muted)] whitespace-nowrap">
                         {formatShortDate(order.dateLost || order.orderDate) || '—'}
+                      </td>
+                      <td className="py-3 px-3 font-mono text-xs text-[var(--text-muted)] whitespace-nowrap">
+                        {order.timestamp ? formatDateTime(order.timestamp) : '—'}
                       </td>
                     </tr>
                   );
@@ -597,15 +706,46 @@ export function LostOrdersPage() {
             </tbody>
           </table>
         </div>
-
-        <Pagination
-          currentPage={currentPage}
-          totalItems={filteredOrders.length}
-          pageSize={pageSize}
-          onPageChange={setCurrentPage}
-          onPageSizeChange={setPageSize}
-        />
       </div>
+
+      <Pagination
+        currentPage={currentPage}
+        totalItems={filteredOrders.length}
+        pageSize={pageSize}
+        onPageChange={setCurrentPage}
+        onPageSizeChange={setPageSize}
+      />
+
+      <ConfirmDialog
+        open={Boolean(deleteTarget)}
+        tone="danger"
+        title="Delete this lost order?"
+        message={
+          deleteTarget ? (
+            <>
+              <span className="font-mono font-semibold">{deleteTarget.caseId}</span> will be removed from the sheet.
+            </>
+          ) : undefined
+        }
+        details={
+          deleteTarget
+            ? [
+                `${deleteTarget.customer} — ${deleteTarget.product}`,
+                `Order value: ${formatCurrency(deleteTarget.orderValue)}`,
+                `Competitor: ${compLabel(deleteTarget)}`,
+                'This cannot be undone.',
+              ]
+            : []
+        }
+        confirmLabel="Delete Order"
+        busyLabel="Deleting..."
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={async () => {
+          if (!deleteTarget) return;
+          await handleDeleteOrder(deleteTarget.caseId);
+          setDeleteTarget(null);
+        }}
+      />
 
       {/* Add Lost Order Modal */}
       {showAddModal && (
@@ -782,7 +922,7 @@ export function LostOrdersPage() {
                     htmlFor="lo-value"
                     className="block text-xs font-semibold text-[var(--text-body)] mb-1.5"
                   >
-                    Order Value (USD) *
+                    Order Value *
                   </label>
                   <input
                     id="lo-value"
