@@ -277,7 +277,7 @@ function saveLabTest2_(u, p) {
   const c0 = fms_();
   if (!c0.m.actual5) throw new Error('Test 2 columns are missing. Run "Competitor Lab → Setup Lab Test columns & dropdowns" in the sheet.');
   const { c, o } = open_(u, p, 'testEntry', 5);
-  if (!o.actual4) throw new Error('Test 1 (Test 1) is not completed yet.');
+  if (!o.actual4) throw new Error('Test 1 is not completed yet.');
   const has = v => v !== undefined && v !== null && String(v).trim() !== '';
   const status = String(p.testStatus || '').trim();
   if (!status) throw new Error('Status is required.');
@@ -563,7 +563,7 @@ const rowObj_ = (c, row, vals) => {
     if (idx >= 0 && idx < vals.length) {
       const v = vals[idx];
       // Number columns (Rate / Qty / Enquiry Value) that the sheet formats as a date: read back the real number.
-      o[k] = (v instanceof Date && NUM_KEYS.indexOf(k) >= 0) ? serial_(v) : cell_(v);
+      o[k] = (v instanceof Date && isNum_(k)) ? serial_(v) : cell_(v);
     }
   });
   return o;
@@ -714,8 +714,10 @@ function arrayCols_(c) {
 const DATE_FMT = 'dd/mm/yyyy hh:mm:ss', NUM_FMT = '#,##0.##';
 // Date -> the sheet's serial number (days since 30-Dec-1899), e.g. 09-Apr-1900 -> 100.
 const serial_ = d => Math.round(((d.getTime() - new Date(1899, 11, 30).getTime()) / 86400000) * 1e6) / 1e6;
-const NUM_KEYS = ['qty', 'orderValue', 'competitorRate'];
-const fmtFor_ = k => (isPlanned_(k) || isActual_(k) || k === 'timestamp' || k === 'pendingPlanned' || /date/i.test(k)) ? DATE_FMT : NUM_KEYS.indexOf(k) >= 0 ? NUM_FMT : null;
+// Number columns: amounts / qty / rate, and every Delay column (Delay 6, Pending Delay, Total Delay).
+const NUM_KEYS = ['qty', 'orderValue', 'competitorRate', 'pendingDelay', 'totalDelay'];
+const isNum_ = k => NUM_KEYS.indexOf(k) >= 0 || /^delay\d+$/.test(k);
+const fmtFor_ = k => (isPlanned_(k) || isActual_(k) || k === 'timestamp' || k === 'pendingPlanned' || /date/i.test(k)) ? DATE_FMT : isNum_(k) ? NUM_FMT : null;
 function formatRow_(c, r, keys) {
   const by = {};
   (keys || Object.keys(c.m)).forEach(k => { const f = fmtFor_(k); if (f && c.m[k]) (by[f] = by[f] || []).push(L(c.m[k]) + r); });
