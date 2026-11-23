@@ -2,7 +2,8 @@ export type PageKey =
   | 'dashboard'
   | 'lostOrders'
   | 'samples'
-  | 'testEntry';
+  | 'testEntry'
+  | 'management';
 
 export type PagePermission = 'none' | 'view' | 'full';
 
@@ -72,6 +73,13 @@ export interface MastersData {
   sourceTypes: MasterValueItem[];
   conditions: MasterValueItem[];
   priorities: MasterValueItem[];
+  /** Masters block "Firm Names" (column "Value" or "Name"); optional. */
+  firmNames: Array<MasterValueItem & { name?: string }>;
+  fmsNames?: Array<MasterValueItem & { name?: string }>;
+  /** Masters blocks for the Enter Test form. */
+  testStatus?: Array<MasterValueItem & { name?: string }>;
+  testedBy?: Array<MasterValueItem & { name?: string }>;
+  flowOfMaterial?: Array<MasterValueItem & { name?: string }>;
   tat: TatSettingRow[];
   holidays: HolidayRow[];
 }
@@ -110,6 +118,14 @@ export interface LabCase {
   orderNotes: string;
   enteredBy: string;
 
+  // "Order Not Received" form fields (FMS columns: Enquiry No, Qty, FMS Name, Competitor Rate, Sample Required)
+  enquiryNo?: string;
+  firmName?: string;
+  qty?: number | string;
+  fmsName?: string;
+  competitorRate?: number | string;
+  sampleRequired?: string;
+
   // Read-only FMS timestamps
   planned1?: string;
   planned2?: string;
@@ -144,6 +160,20 @@ export interface LabCase {
 
   // Testing & results
   testedBy?: string;
+  /** Test 1 (Test Entry) status / remarks / date. */
+  testStatus?: string;
+  testRemarks?: string;
+  dateOfTest?: string;
+  /** Test 2 (Step 5) */
+  test2Status?: string;
+  test2Remarks?: string;
+  dateOfTest2?: string;
+  testedBy2?: string;
+  /** Management Action (Step 6) */
+  planned6?: string;
+  actual6?: string;
+  remark6?: string;
+  delay6?: number | string;
   results: CaseTestResult[];
   passCount?: number;
   failCount?: number;

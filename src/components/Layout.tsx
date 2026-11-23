@@ -11,6 +11,8 @@ import {
   EyeOff,
   FileSearch,
   FlaskConical,
+  FlaskRound,
+  ClipboardCheck,
   Info,
   KeyRound,
   LayoutDashboard,
@@ -46,6 +48,7 @@ const ICONS: Record<string, NavItem['icon']> = {
   lostOrders: ClipboardList,
   samples: Package,
   testEntry: FlaskConical,
+  management: ClipboardCheck,
   users: Users,
 };
 
@@ -109,12 +112,12 @@ export function Layout({ children }: { children: React.ReactNode }) {
   /* ---------------- Navigation model ---------------- */
 
   const navItems: NavItem[] = useMemo(() => {
-    const items: NavItem[] = PAGE_DEFINITIONS.filter((def) => canViewPage(currentUser, def.key)).map((def) => ({
-      key: def.key,
-      path: def.path,
-      label: def.label,
-      icon: ICONS[def.key],
-    }));
+    const items: NavItem[] = [];
+    PAGE_DEFINITIONS.filter((def) => canViewPage(currentUser, def.key)).forEach((def) => {
+      items.push({ key: def.key, path: def.path, label: def.label, icon: ICONS[def.key] });
+      // Test 2 (Stage 5) sits right after Test 1 and uses the same permission.
+      if (def.key === 'testEntry') items.push({ key: 'test2', path: '/test-2', label: 'Test 2', icon: FlaskRound });
+    });
     if (currentUser?.isAdmin) {
       items.push({ key: 'users', path: '/users', label: 'User Management', icon: Users });
     }
@@ -124,12 +127,13 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const pageTitle =
     location.pathname === '/users'
       ? 'User Management'
+      : location.pathname === '/test-2'
+      ? 'Test 2'
       : PAGE_DEFINITIONS.find((d) => d.path === location.pathname)?.label || 'Workspace';
 
   // Primary "+ New Entry" action, chosen by what the user is allowed to create.
   const newEntry = useMemo(() => {
     if (canFullAccessPage(currentUser, 'lostOrders')) return { path: '/lost-orders?new=1', label: 'New Lost Order' };
-    if (canFullAccessPage(currentUser, 'samples')) return { path: '/samples?new=1', label: 'Request Sample' };
     if (currentUser?.isAdmin) return { path: '/users?new=1', label: 'Add User' };
     return null;
   }, [currentUser]);
@@ -161,7 +165,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
       items.push({
         id: 'active-tests',
         title: `${activeTests} bench test${activeTests === 1 ? '' : 's'} pending entry`,
-        detail: 'Measurements awaiting completion on Test Entry.',
+        detail: 'Measurements awaiting completion on Test 1.',
         tone: 'info',
         path: '/test-entry',
       });
@@ -205,6 +209,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
             const comp = (competitorNames.get(c.competitorId) || c.competitorName || '').toLowerCase();
             return (
               c.caseId.toLowerCase().includes(q) ||
+              String(c.enquiryNo ?? '').toLowerCase().includes(q) ||
               (c.sampleCode || '').toLowerCase().includes(q) ||
               c.customer.toLowerCase().includes(q) ||
               c.product.toLowerCase().includes(q) ||
@@ -214,7 +219,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
           .map((c) => ({
             kind: 'case' as const,
             id: `case-${c.caseId}`,
-            label: `${c.caseId}${c.sampleCode ? ` · ${c.sampleCode}` : ''}`,
+            label: `${c.caseId}${c.enquiryNo ? ` · ${c.enquiryNo}` : ''}${c.sampleCode ? ` · ${c.sampleCode}` : ''}`,
             hint: `${c.customer} — ${c.product}`,
             labCase: c,
           }))

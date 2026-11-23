@@ -11,14 +11,16 @@ export const PAGE_DEFINITIONS: PageDefinition[] = [
   { key: 'dashboard', path: '/', label: 'Dashboard', title: 'Executive Overview' },
   { key: 'lostOrders', path: '/lost-orders', label: 'Lost Orders', title: 'Lost Orders Registry' },
   { key: 'samples', path: '/samples', label: 'Samples', title: 'Sample Tracking Pipeline' },
-  { key: 'testEntry', path: '/test-entry', label: 'Test Entry', title: 'Laboratory Test Entry' },
+  { key: 'testEntry', path: '/test-entry', label: 'Test 1', title: 'Laboratory Test 1' },
+  { key: 'management', path: '/management-action', label: 'Management Action', title: 'Management Action' },
 ];
 
 const KNOWN_PAGE_LABEL_MAP: Record<string, string> = {
   dashboard: 'Dashboard',
   lostOrders: 'Lost Orders',
   samples: 'Samples',
-  testEntry: 'Test Entry',
+  testEntry: 'Test 1',
+  management: 'Management Action',
 };
 
 export function resolveSchemaPageRows(
@@ -77,6 +79,7 @@ export const PERMISSION_PRESETS: PermissionPreset[] = [
       lostOrders: 'full',
       samples: 'view',
       testEntry: 'none',
+      management: 'none',
     },
   },
   {
@@ -87,6 +90,7 @@ export const PERMISSION_PRESETS: PermissionPreset[] = [
       lostOrders: 'none',
       samples: 'full',
       testEntry: 'full',
+      management: 'none',
     },
   },
   {
@@ -97,6 +101,7 @@ export const PERMISSION_PRESETS: PermissionPreset[] = [
       lostOrders: 'view',
       samples: 'view',
       testEntry: 'view',
+      management: 'full',
     },
   },
   {
@@ -107,6 +112,7 @@ export const PERMISSION_PRESETS: PermissionPreset[] = [
       lostOrders: 'view',
       samples: 'view',
       testEntry: 'view',
+      management: 'view',
     },
   },
 ];

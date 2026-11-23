@@ -188,11 +188,22 @@ export function CaseDetailModal({ labCase, onClose }: CaseDetailModalProps) {
               )}
               <dl className="grid grid-cols-2 gap-x-4 gap-y-3 flex-1 min-w-0 w-full">
                 {[
-                  ['Order Value', <span className="font-mono">{formatCurrency(liveCase.orderValue)}</span>],
+                  ['Enquiry No', <span className="font-mono">{liveCase.enquiryNo || '—'}</span>],
+                  ['Firm Name', liveCase.firmName || '—'],
+                  ['Name Of FMS', liveCase.fmsName || '—'],
+                  ['Enquiry Value', <span className="font-mono">{formatCurrency(liveCase.orderValue)}</span>],
+                  ['Qty', <span className="font-mono">{liveCase.qty !== undefined && liveCase.qty !== '' ? String(liveCase.qty) : '—'}</span>],
                   ['Category', liveCase.category || '—'],
-                  ['Competitor', competitorName],
+                  ['Given To', competitorName],
+                  [
+                    'Rate',
+                    <span className="font-mono">
+                      {liveCase.competitorRate !== undefined && liveCase.competitorRate !== '' ? String(liveCase.competitorRate) : '—'}
+                    </span>,
+                  ],
                   ['Loss Reason', liveCase.lossReason || '—'],
-                  ['Order Date', <span className="font-mono">{formatShortDate(liveCase.orderDate)}</span>],
+                  ['Take Sample?', liveCase.sampleRequired || '—'],
+                  ['Date Lost', <span className="font-mono">{formatShortDate(liveCase.orderDate)}</span>],
                   ['Entered By', liveCase.enteredBy || '—'],
                 ].map(([label, value]) => (
                   <div key={String(label)} className="min-w-0">
@@ -219,9 +230,10 @@ export function CaseDetailModal({ labCase, onClose }: CaseDetailModalProps) {
               )}
             </div>
             {liveCase.orderNotes && (
-              <p className="mt-3 pt-3 border-t border-[var(--border-subtle)] text-[13px] text-[var(--text-body)]">
-                {liveCase.orderNotes}
-              </p>
+              <div className="mt-3 pt-3 border-t border-[var(--border-subtle)]">
+                <p className="text-[10px] font-bold uppercase tracking-wider text-[var(--text-muted)]">Why Us Not Received Order</p>
+                <p className="text-[13px] text-[var(--text-body)] mt-0.5">{liveCase.orderNotes}</p>
+              </div>
             )}
           </section>
 

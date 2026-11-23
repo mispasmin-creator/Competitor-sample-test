@@ -393,7 +393,6 @@ export function CompetitorsPage() {
                     setName(e.target.value);
                     setErrors((prev) => ({ ...prev, name: '' }));
                   }}
-                  placeholder="e.g. Precision Dynamics AG"
                   className="fin-input w-full px-3.5 text-sm"
                 />
                 {errors.name && (
@@ -422,7 +421,6 @@ export function CompetitorsPage() {
                     setHeadquarters(e.target.value);
                     setErrors((prev) => ({ ...prev, headquarters: '' }));
                   }}
-                  placeholder="e.g. Munich, Germany"
                   className="fin-input w-full px-3.5 text-sm"
                 />
                 {errors.headquarters && (
@@ -451,7 +449,6 @@ export function CompetitorsPage() {
                     setMarketSegment(e.target.value);
                     setErrors((prev) => ({ ...prev, marketSegment: '' }));
                   }}
-                  placeholder="e.g. OEM Hydraulic Actuation"
                   className="fin-input w-full px-3.5 text-sm"
                 />
                 {errors.marketSegment && (
@@ -477,7 +474,6 @@ export function CompetitorsPage() {
                   type="url"
                   value={website}
                   onChange={(e) => setWebsite(e.target.value)}
-                  placeholder="https://example.com"
                   className="fin-input w-full px-3.5 text-sm"
                 />
               </div>
@@ -494,7 +490,6 @@ export function CompetitorsPage() {
                   rows={2}
                   value={notes}
                   onChange={(e) => setNotes(e.target.value)}
-                  placeholder="Pricing posture, known material specs, lead times..."
                   className="fin-textarea w-full p-3.5 text-sm"
                 />
               </div>

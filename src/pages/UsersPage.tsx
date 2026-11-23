@@ -651,7 +651,6 @@ export function UsersPage() {
                       setName(e.target.value);
                       setFormErrors((prev) => ({ ...prev, name: '' }));
                     }}
-                    placeholder="e.g. Elena Vance"
                     className="fin-input w-full px-3.5 text-sm"
                   />
                   {formErrors.name && (
@@ -681,7 +680,6 @@ export function UsersPage() {
                       setUsername(e.target.value);
                       setFormErrors((prev) => ({ ...prev, username: '' }));
                     }}
-                    placeholder="e.g. elena.vance"
                     className="fin-input w-full px-3.5 text-sm font-mono"
                   />
                   {isEditingDefaultAdmin && (

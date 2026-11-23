@@ -408,7 +408,6 @@ export function TemplatesPage() {
                       setName(e.target.value);
                       setErrors((prev) => ({ ...prev, name: '' }));
                     }}
-                    placeholder="e.g. Burst Pressure"
                     className="fin-input w-full px-3.5 text-sm"
                   />
                   {errors.name && (
@@ -437,7 +436,6 @@ export function TemplatesPage() {
                       setUnit(e.target.value);
                       setErrors((prev) => ({ ...prev, unit: '' }));
                     }}
-                    placeholder="bar"
                     className="fin-input w-full px-3.5 text-sm font-mono"
                   />
                   {errors.unit && (
@@ -649,7 +647,6 @@ export function TemplatesPage() {
                     setNewCategoryName(e.target.value);
                     setCategoryError('');
                   }}
-                  placeholder="e.g. Pneumatic Solenoid Manifolds"
                   className="fin-input w-full px-3.5 text-sm"
                 />
                 {categoryError && (
@@ -674,7 +671,6 @@ export function TemplatesPage() {
                   rows={2}
                   value={newCategoryDesc}
                   onChange={(e) => setNewCategoryDesc(e.target.value)}
-                  placeholder="Scope of laboratory measurements for this category..."
                   className="fin-textarea w-full p-3.5 text-sm"
                 />
               </div>

@@ -457,7 +457,6 @@ export function ReportsPage() {
                   type="text"
                   value={managerComment}
                   onChange={(e) => setManagerComment(e.target.value)}
-                  placeholder="Action items for R&D or Sales engineering..."
                   className="fin-input w-full px-3.5 text-xs bg-[var(--bg-surface)]"
                 />
               </div>

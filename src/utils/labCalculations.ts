@@ -56,6 +56,12 @@ export const KNOWN_CASE_KEYS = new Set<string>([
   'lossReason',
   'orderNotes',
   'enteredBy',
+  'enquiryNo',
+  'firmName',
+  'qty',
+  'fmsName',
+  'competitorRate',
+  'sampleRequired',
   'planned1',
   'planned2',
   'planned3',
@@ -336,7 +342,7 @@ export function generateAutoVerdict(
   const productLabel = labCase.sampleName || labCase.product;
 
   if (summary.measuredCount === 0) {
-    return `Sample ${sampleLabel} (${productLabel}) from ${competitorName} has not been benchmarked yet. Enter test measurements in Test Entry to generate an empirical comparison verdict.`;
+    return `Sample ${sampleLabel} (${productLabel}) from ${competitorName} has not been benchmarked yet. Enter test measurements in Test 1 to generate an empirical comparison verdict.`;
   }
 
   const testedRows = rows.filter((r) => r.measuredValue !== null);
@@ -478,6 +484,44 @@ export function validateLostOrderForm(input: {
     errors.lossReason = 'Select a loss reason.';
   }
   if (!input.orderDate.trim()) errors.orderDate = 'Order loss date is required.';
+  return { valid: Object.keys(errors).length === 0, errors };
+}
+
+export const FMS_NAME_OPTIONS = ['NBD & NBD OF CRR FMS', 'CRR ENQUIRY'] as const;
+
+/** True when the order was logged with "Have To Take Sample = No" and no sample was requested anyway. */
+export function isSampleNotRequired(c: Pick<LabCase, 'sampleRequired' | 'actual2' | 'sampleCode'>): boolean {
+  return /^no$/i.test(String(c.sampleRequired ?? '').trim()) && !c.actual2 && !c.sampleCode;
+}
+
+/** Validates the "Order Not Received" form fields added on top of validateLostOrderForm. */
+export function validateOrderNotReceivedFields(
+  input: {
+    enquiryNo: string;
+    firmName: string;
+    qty: string;
+    fmsName: string;
+    competitorRate: string;
+    reasonText: string;
+    sampleRequired: string;
+  },
+  existingCases: Array<Pick<LabCase, 'caseId' | 'enquiryNo'>> = []
+): ValidationResult {
+  const errors: Record<string, string> = {};
+  const enq = input.enquiryNo.trim();
+  if (!enq) errors.enquiryNo = 'Enquiry No is required.';
+  else {
+    const dup = existingCases.find((c) => String(c.enquiryNo ?? '').trim().toLowerCase() === enq.toLowerCase());
+    if (dup) errors.enquiryNo = `This Enquiry No is already logged as ${dup.caseId}.`;
+  }
+  if (!input.firmName.trim()) errors.firmName = 'Select the firm name.';
+  const qty = Number(input.qty);
+  if (!input.qty.trim() || Number.isNaN(qty) || qty <= 0) errors.qty = 'Qty must be greater than zero.';
+  if (!input.fmsName.trim()) errors.fmsName = 'Select the FMS name.';
+  const rate = Number(input.competitorRate);
+  if (!input.competitorRate.trim() || Number.isNaN(rate) || rate <= 0) errors.competitorRate = 'Rate must be greater than zero.';
+  if (!input.reasonText.trim()) errors.notes = 'Tell us why the order was not received.';
+  if (input.sampleRequired !== 'Yes' && input.sampleRequired !== 'No') errors.sampleRequired = 'Choose Yes or No.';
   return { valid: Object.keys(errors).length === 0, errors };
 }
 

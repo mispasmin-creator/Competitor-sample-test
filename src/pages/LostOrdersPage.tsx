@@ -5,8 +5,11 @@ import { useLab } from '../context/LabContext';
 import { canFullAccessPage } from '../utils/auth';
 import { formatCurrency, formatDateTime, formatShortDate } from '../utils/fileHelpers';
 import {
+  FMS_NAME_OPTIONS,
   getLocalTodayIsoDate,
   isCaseOverdue,
+  isSampleNotRequired,
+  validateOrderNotReceivedFields,
   validateLostOrderForm,
   validateSampleRequestForm,
 } from '../utils/labCalculations';
@@ -24,7 +27,10 @@ import {
 } from '../components/ui';
 import type { LabCase } from '../types/lab';
 
-const DEFAULT_LOSS_REASONS = ['Price', 'Quality', 'Delivery', 'Other'];
+// Masters rows can include the column heading itself (e.g. "Value") if the Masters tab layout is off by a row.
+const isRealMasterValue = (v: string) => Boolean(v) && !/^value$/i.test(String(v).trim());
+
+const DEFAULT_LOSS_REASONS =['Price', 'Quality', 'Delivery', 'Other'];
 const DEFAULT_SOURCE_TYPES = ['Customer', 'Market-Retail Shop', 'Dealer-Distributor', 'Online', 'Other'];
 const DEFAULT_PRIORITIES = ['Low', 'Medium', 'High'];
 
@@ -36,8 +42,7 @@ export function LostOrdersPage() {
     addLostOrder,
     deleteLostOrder,
     requestSample,
-    saveCompetitor,
-    saveCategory,
+    addToast,
   } = useLab();
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -60,17 +65,17 @@ export function LostOrdersPage() {
   }, [searchParams]);
 
   const lossReasonOptions = useMemo(() => {
-    const vals = masters.lossReasons.map((m) => m.value).filter(Boolean);
+    const vals = masters.lossReasons.map((m) => m.value).filter(isRealMasterValue);
     return vals.length > 0 ? vals : DEFAULT_LOSS_REASONS;
   }, [masters.lossReasons]);
 
   const sourceTypeOptions = useMemo(() => {
-    const vals = masters.sourceTypes.map((m) => m.value).filter(Boolean);
+    const vals = masters.sourceTypes.map((m) => m.value).filter(isRealMasterValue);
     return vals.length > 0 ? vals : DEFAULT_SOURCE_TYPES;
   }, [masters.sourceTypes]);
 
   const priorityOptions = useMemo(() => {
-    const vals = masters.priorities.map((m) => m.value).filter(Boolean);
+    const vals = masters.priorities.map((m) => m.value).filter(isRealMasterValue);
     return vals.length > 0 ? vals : DEFAULT_PRIORITIES;
   }, [masters.priorities]);
 
@@ -84,7 +89,44 @@ export function LostOrdersPage() {
   const [lossReason, setLossReason] = useState('');
   const [orderDate, setOrderDate] = useState(todayIso);
   const [notes, setNotes] = useState('');
+  // "Order Not Received" Google Form fields
+  const [enquiryNo, setEnquiryNo] = useState('');
+  const [qty, setQty] = useState('');
+  const [fmsName, setFmsName] = useState('');
+  const [competitorRate, setCompetitorRate] = useState('');
+  const [sampleRequired, setSampleRequired] = useState<'' | 'Yes' | 'No'>('');
+  const [firmChoice, setFirmChoice] = useState('');
+  const [newFirmName, setNewFirmName] = useState('');
+  const firmName = firmChoice === '__new__' ? newFirmName.trim() : firmChoice;
+
+  // Firm dropdown: Masters "Firm Names" list + any firm already used on an order.
+  const firmOptions = useMemo(() => {
+    const seen = new Map<string, string>();
+    const add = (v?: string) => {
+      const s = String(v ?? '').trim();
+      if (isRealMasterValue(s) && !seen.has(s.toLowerCase())) seen.set(s.toLowerCase(), s);
+    };
+    (masters.firmNames || []).forEach((f) => add(f.value || f.name));
+    cases.forEach((c) => add(c.firmName));
+    return Array.from(seen.values()).sort((a, b) => a.localeCompare(b));
+  }, [masters.firmNames, cases]);
+
+  // Name Of FMS dropdown: Masters "FMS Names" block, else the Google Form defaults.
+  const fmsOptions = useMemo(() => {
+    const fromMasters = (masters.fmsNames || [])
+      .map((f) => String(f.value || f.name || '').trim())
+      .filter(isRealMasterValue);
+    return fromMasters.length ? Array.from(new Set(fromMasters)) : [...FMS_NAME_OPTIONS];
+  }, [masters.fmsNames]);
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const labelCls = 'block text-xs font-semibold text-[var(--text-body)] mb-1.5';
+  const clearErr = (k: string) => setErrors((prev) => (prev[k] ? { ...prev, [k]: '' } : prev));
+  const fieldError = (k: string) =>
+    errors[k] ? (
+      <p className="text-xs mt-1" style={{ color: 'var(--status-danger-fg)' }} role="alert">
+        {errors[k]}
+      </p>
+    ) : null;
   const [submittingOrder, setSubmittingOrder] = useState(false);
   const [deletingCaseId, setDeletingCaseId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<LabCase | null>(null);
@@ -92,7 +134,7 @@ export function LostOrdersPage() {
   // Request Sample modal state
   const [requestOrder, setRequestOrder] = useState<LabCase | null>(null);
   const [sampleName, setSampleName] = useState('');
-  const [qtyNeeded, setQtyNeeded] = useState('2');
+  const [qtyNeeded, setQtyNeeded] = useState('');
   const [sourceType, setSourceType] = useState('');
   const [sourceLocation, setSourceLocation] = useState('');
   const [responsiblePerson, setResponsiblePerson] = useState('');
@@ -107,8 +149,9 @@ export function LostOrdersPage() {
     [masters.competitors]
   );
 
+  // Processed = a sample was requested, or the order was logged with "Have To Take Sample = No".
   const isOrderProcessed = (c: LabCase) =>
-    c.status !== 'No Sample' || Boolean(c.sampleCode || c.actual2);
+    c.status !== 'No Sample' || Boolean(c.sampleCode || c.actual2) || isSampleNotRequired(c);
 
   const activeOrdersCount = useMemo(
     () => cases.filter((c) => !isOrderProcessed(c)).length,
@@ -159,6 +202,7 @@ export function LostOrdersPage() {
       ).toLowerCase();
       return (
         order.caseId.toLowerCase().includes(q) ||
+        String(order.enquiryNo ?? '').toLowerCase().includes(q) ||
         order.customer.toLowerCase().includes(q) ||
         order.product.toLowerCase().includes(q) ||
         order.category.toLowerCase().includes(q) ||
@@ -201,13 +245,20 @@ export function LostOrdersPage() {
   const openModal = () => {
     setCustomer('');
     setProduct('');
-    setCategory(masters.categories[0]?.category ?? '');
+    setCategory('');
     setOrderValue('');
-    setCompetitorId(masters.competitors[0]?.id ?? '__new__');
+    setCompetitorId(masters.competitors.length ? '' : '__new__');
     setNewCompetitorName('');
-    setLossReason(lossReasonOptions[0] ?? 'Price');
+    setLossReason('');
     setOrderDate(getLocalTodayIsoDate());
     setNotes('');
+    setEnquiryNo('');
+    setQty('');
+    setFmsName('');
+    setCompetitorRate('');
+    setSampleRequired('');
+    setFirmChoice('');
+    setNewFirmName('');
     setErrors({});
     setShowAddModal(true);
   };
@@ -225,12 +276,12 @@ export function LostOrdersPage() {
   const openRequestSampleModal = (order: LabCase) => {
     setRequestOrder(order);
     setSampleName(order.product);
-    setQtyNeeded('2');
-    setSourceType(sourceTypeOptions[0] ?? 'Customer');
+    setQtyNeeded('');
+    setSourceType('');
     setSourceLocation('');
     setResponsiblePerson('');
     setExpectedDate('');
-    setPriority(priorityOptions.includes('Medium') ? 'Medium' : priorityOptions[0] ?? 'Medium');
+    setPriority('');
     setRequestNotes('');
     setRequestErrors({});
   };
@@ -250,56 +301,70 @@ export function LostOrdersPage() {
       orderDate,
     });
 
-    const nextErrors = { ...validation.errors };
+    const extra = validateOrderNotReceivedFields(
+      { enquiryNo, firmName, qty, fmsName, competitorRate, reasonText: notes, sampleRequired },
+      cases
+    );
+    const nextErrors = { ...validation.errors, ...extra.errors };
     if (isNewCompetitor && !newCompetitorName.trim()) {
       nextErrors.competitorId = 'Enter the competitor name.';
     }
 
     if (Object.keys(nextErrors).length > 0) {
       setErrors(nextErrors);
+      // Errors sit under each field; jump to the first one so it isn't missed off-screen.
+      const fieldOrder: Array<[string, string, string]> = [
+        ['enquiryNo', 'lo-enquiry', 'Enquiry No'],
+        ['fmsName', 'lo-fms', 'Name Of FMS'],
+        ['firmName', 'lo-firm', 'Firm Name'],
+        ['customer', 'lo-customer', 'Name Of Company'],
+        ['product', 'lo-product', 'Product Name'],
+        ['category', 'lo-category', 'Product Category'],
+        ['qty', 'lo-qty', 'Qty'],
+        ['orderDate', 'lo-date', 'Date Lost'],
+        ['orderValue', 'lo-value', 'Total Enquiry Value'],
+        ['competitorId', 'lo-competitor', 'Given To Whom'],
+        ['competitorRate', 'lo-rate', 'Rate'],
+        ['lossReason', 'lo-reason', 'Main Loss Reason'],
+        ['notes', 'lo-notes', 'Why Us Not Received Order'],
+        ['sampleRequired', 'lo-sample-label', 'Have To Take Sample'],
+      ];
+      const bad = fieldOrder.filter(([k]) => nextErrors[k]);
+      const first = bad[0];
+      if (first) {
+        const el = document.getElementById(first[1]);
+        el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        if (el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement) {
+          el.focus({ preventScroll: true });
+        }
+      }
+      addToast({
+        type: 'error',
+        title: bad.length === 1 ? nextErrors[bad[0][0]] : `Please fix ${bad.length} fields`,
+        message: bad.length > 1 ? bad.map(([, , label]) => label).join(', ') : undefined,
+      });
       return;
     }
 
     setSubmittingOrder(true);
     try {
-      const cleanCategory = category.trim();
-      if (
-        cleanCategory &&
-        !masters.categories.some((c) => c.category.toLowerCase() === cleanCategory.toLowerCase())
-      ) {
-        await saveCategory(cleanCategory, `Benchmark test parameters for ${cleanCategory}.`);
-      }
-
-      let finalCompetitorId = competitorId;
-      if (isNewCompetitor) {
-        const cleanCompName = newCompetitorName.trim();
-        const existingIds = new Set(masters.competitors.map((c) => c.id));
-        const compSnap = await saveCompetitor({
-          name: cleanCompName,
-          headquarters: 'Unspecified',
-          marketSegment: cleanCategory || 'General',
-          website: '',
-          notes: 'Added via Lost Orders entry.',
-        });
-        if (!compSnap) return;
-        const createdComp =
-          compSnap.masters.competitors.find((c) => !existingIds.has(c.id)) ??
-          compSnap.masters.competitors.find(
-            (c) => c.name.toLowerCase() === cleanCompName.toLowerCase()
-          );
-        if (!createdComp) return;
-        finalCompetitorId = createdComp.id;
-      }
-
+      // One request: a new category / competitor typed here is added to Masters by the server in the same call.
       const nextSnap = await addLostOrder({
         customer: customer.trim(),
         product: product.trim(),
-        category: cleanCategory,
+        category: category.trim(),
         orderValue: Number(orderValue),
-        competitorId: finalCompetitorId,
+        competitorId: isNewCompetitor ? '' : competitorId,
+        newCompetitorName: isNewCompetitor ? newCompetitorName.trim() : undefined,
         lossReason,
         orderDate,
         notes: notes.trim(),
+        enquiryNo: enquiryNo.trim(),
+        firmName,
+        qty: Number(qty),
+        fmsName,
+        competitorRate: Number(competitorRate),
+        sampleRequired: sampleRequired as 'Yes' | 'No',
       });
 
       if (nextSnap) {
@@ -361,6 +426,8 @@ export function LostOrdersPage() {
   };
 
   const viewOnly = !canEditLostOrders;
+  // History rows are read-only: no Actions column there (open a row to see its details).
+  const showActions = activeTab === 'active' && canEditLostOrders;
   const hasFilters = Boolean(search || competitorFilter !== 'all' || reasonFilter !== 'all' || pendingOnly);
 
   const clearFilters = () => {
@@ -379,11 +446,29 @@ export function LostOrdersPage() {
     (typeof order.competitor === 'string' ? order.competitor : '') ||
     '—';
 
+  const sampleStatusNode = (order: LabCase) =>
+    isSampleNotRequired(order) ? (
+      <span
+        className="inline-flex items-center px-2.5 py-1 text-xs font-semibold rounded-full whitespace-nowrap"
+        style={{ backgroundColor: 'var(--status-neutral-bg)', color: 'var(--text-muted)' }}
+      >
+        Sample not required
+      </span>
+    ) : (
+      <SampleStatusBadge status={order.status} />
+    );
+
   const handleExportCsv = () => {
     const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-    const headers = ['Case ID', 'Date Lost', 'Customer', 'Product', 'Category', 'Order Value', 'Competitor', 'Loss Reason', 'Status', 'Notes'];
+    const headers = [
+      'Case ID', 'Enquiry No', 'Firm Name', 'Name Of FMS', 'Date Lost', 'Company', 'Product', 'Category', 'Qty',
+      'Total Enquiry Value', 'Given To Whom', 'Rate', 'Loss Reason', 'Why Us Not Received Order', 'Have To Take Sample', 'Status',
+    ];
     const rows = filteredOrders.map((o) =>
-      [o.caseId, o.dateLost || o.orderDate, o.customer, o.product, o.category, o.orderValue, compLabel(o), o.lossReason, o.status, o.orderNotes]
+      [
+        o.caseId, o.enquiryNo, o.firmName, o.fmsName, o.dateLost || o.orderDate, o.customer, o.product, o.category, o.qty,
+        o.orderValue, compLabel(o), o.competitorRate, o.lossReason, o.orderNotes, o.sampleRequired, o.status,
+      ]
         .map(esc)
         .join(',')
     );
@@ -541,21 +626,28 @@ export function LostOrdersPage() {
                 key={order.caseId}
                 id={order.caseId}
                 title={order.customer}
-                subtitle={`${order.product}${order.category ? ` · ${order.category}` : ''}`}
+                subtitle={`${order.enquiryNo ? `${order.enquiryNo} · ` : ''}${order.product}${
+                  order.qty !== undefined && order.qty !== '' ? ` · Qty ${order.qty}` : ''
+                }`}
                 onOpen={() => setDetailCase(order)}
                 openLabel={`View details for ${order.caseId}`}
                 highlight={isCaseOverdue(order)}
                 meta={[
                   { label: 'Value', value: <span className="font-mono">{formatCurrency(order.orderValue)}</span> },
-                  { label: 'Competitor', value: compLabel(order) },
-                  { label: 'Reason', value: <LossReasonText reason={order.lossReason} /> },
+                  { label: 'Given To', value: compLabel(order) },
+                  {
+                    label: 'Rate',
+                    value: <span className="font-mono">{order.competitorRate !== undefined && order.competitorRate !== '' ? order.competitorRate : '—'}</span>,
+                  },
                 ]}
                 progress={getCaseProgress(order)}
                 progressTone={isCaseOverdue(order) ? 'danger' : 'brand'}
-                footerLeft={formatShortDate(order.dateLost || order.orderDate) || '—'}
-                footerRight={hasSample ? <SampleStatusBadge status={order.status} /> : <SampleStatusBadge status="No Sample" />}
+                footerLeft={`${formatShortDate(order.dateLost || order.orderDate) || '—'}${order.firmName ? ` · ${order.firmName}` : ''}${
+                  order.fmsName ? ` · ${order.fmsName}` : ''
+                }`}
+                footerRight={hasSample ? <SampleStatusBadge status={order.status} /> : sampleStatusNode(order)}
                 actions={
-                  canEditLostOrders ? (
+                  showActions ? (
                     <>
                       {!hasSample && (
                         <button
@@ -590,23 +682,27 @@ export function LostOrdersPage() {
           <table className="min-w-[1180px] w-full text-left border-collapse">
             <thead>
               <tr className="fin-table-head text-[11px] uppercase">
-                <th className="py-3 px-3 rounded-l-xl whitespace-nowrap">Actions</th>
-                <th className="py-3 px-3 whitespace-nowrap">Case ID</th>
-                <th className="py-3 px-3 whitespace-nowrap">Customer</th>
+                {showActions && <th className="py-3 px-3 rounded-l-xl whitespace-nowrap">Actions</th>}
+                <th className={`py-3 px-3 whitespace-nowrap ${showActions ? '' : 'rounded-l-xl'}`}>Case ID</th>
+                <th className="py-3 px-3 whitespace-nowrap">Enquiry No</th>
+                <th className="py-3 px-3 whitespace-nowrap">Firm</th>
+                {activeTab === 'history' && <th className="py-3 px-3 whitespace-nowrap">Sample Status</th>}
+                <th className="py-3 px-3 whitespace-nowrap">Company</th>
                 <th className="py-3 px-3 whitespace-nowrap">Product</th>
-                <th className="py-3 px-3 whitespace-nowrap">Category</th>
-                <th className="py-3 px-3 text-right whitespace-nowrap">Order Value</th>
-                <th className="py-3 px-3 whitespace-nowrap">Competitor</th>
+                <th className="py-3 px-3 text-right whitespace-nowrap">Qty</th>
+                <th className="py-3 px-3 text-right whitespace-nowrap">Enquiry Value</th>
+                <th className="py-3 px-3 whitespace-nowrap">Given To</th>
+                <th className="py-3 px-3 text-right whitespace-nowrap">Rate</th>
+                <th className="py-3 px-3 whitespace-nowrap">FMS</th>
                 <th className="py-3 px-3 whitespace-nowrap">Loss Reason</th>
-                <th className="py-3 px-3 whitespace-nowrap">Notes</th>
-                <th className="py-3 px-3 whitespace-nowrap">Date Lost</th>
-                <th className="py-3 px-3 rounded-r-xl whitespace-nowrap">Logged</th>
+                <th className="py-3 px-3 whitespace-nowrap">Why Not Received</th>
+                <th className="py-3 px-3 rounded-r-xl whitespace-nowrap">Date Lost</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[var(--border-subtle)] text-[13px]">
               {filteredOrders.length === 0 ? (
                 <tr>
-                  <td colSpan={11}>
+                  <td colSpan={showActions || activeTab === 'history' ? 14 : 13}>
                     <EmptyState
                       icon={<Inbox className="w-5 h-5" />}
                       title={pendingOnly ? 'No sample requests pending' : 'No matching lost orders'}
@@ -619,20 +715,12 @@ export function LostOrdersPage() {
                   const hasSample = order.status !== 'No Sample';
                   return (
                     <tr key={order.caseId} onClick={() => setDetailCase(order)} className="fin-table-row cursor-pointer">
+                      {showActions && (
                       <td className="py-3 px-3 whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                         <div className="inline-flex items-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => setDetailCase(order)}
-                            aria-label={`View details for ${order.caseId}`}
-                            title="View case details"
-                            className="w-9 h-9 rounded-full inline-flex items-center justify-center border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--color-primary)] hover:bg-[var(--mint)] transition-colors"
-                          >
-                            <Eye className="w-4 h-4" aria-hidden="true" />
-                          </button>
                           {hasSample ? (
                             <SampleStatusBadge status={order.status} />
-                          ) : canEditLostOrders ? (
+                          ) : (
                             <button
                               type="button"
                               onClick={() => openRequestSampleModal(order)}
@@ -642,10 +730,8 @@ export function LostOrdersPage() {
                               <FlaskConical className="w-3.5 h-3.5" aria-hidden="true" />
                               Request Sample
                             </button>
-                          ) : (
-                            <span className="text-xs text-[var(--text-muted)] px-2">No sample</span>
                           )}
-                          {canEditLostOrders && (
+                          {(
                             <button
                               type="button"
                               disabled={deletingCaseId === order.caseId}
@@ -663,21 +749,33 @@ export function LostOrdersPage() {
                           )}
                         </div>
                       </td>
+                      )}
                       <td className="py-3 px-3 font-mono font-bold text-xs text-[var(--color-primary)] whitespace-nowrap">
                         {order.caseId}
                       </td>
+                      <td className="py-3 px-3 font-mono text-xs text-[var(--text-heading)] whitespace-nowrap">
+                        {order.enquiryNo || '—'}
+                      </td>
+                      <td className="py-3 px-3 text-[13px] text-[var(--text-body)] max-w-[140px] truncate" title={order.firmName}>
+                        {order.firmName || '—'}
+                      </td>
+                      {activeTab === 'history' && (
+                        <td className="py-3 px-3 whitespace-nowrap">
+                          {sampleStatusNode(order)}
+                        </td>
+                      )}
                       <td className="py-3 px-3 max-w-[170px]">
                         <p className="font-semibold text-[var(--text-heading)] truncate" title={order.customer}>
                           {order.customer}
                         </p>
                       </td>
                       <td className="py-3 px-3 max-w-[170px]">
-                        <p className="text-[var(--text-heading)] truncate" title={order.product}>
+                        <p className="text-[var(--text-heading)] truncate" title={`${order.product}${order.category ? ` · ${order.category}` : ''}`}>
                           {order.product}
                         </p>
                       </td>
-                      <td className="py-3 px-3 text-xs text-[var(--text-muted)] max-w-[140px] truncate" title={order.category}>
-                        {order.category || '—'}
+                      <td className="py-3 px-3 text-right font-mono tabular-nums text-[var(--text-heading)] whitespace-nowrap">
+                        {order.qty !== undefined && order.qty !== '' ? String(order.qty) : '—'}
                       </td>
                       <td className="py-3 px-3 text-right font-mono tabular-nums font-bold text-[var(--text-heading)] whitespace-nowrap">
                         {formatCurrency(order.orderValue)}
@@ -685,19 +783,20 @@ export function LostOrdersPage() {
                       <td className="py-3 px-3 text-[var(--text-body)] max-w-[140px] truncate" title={compLabel(order)}>
                         {compLabel(order)}
                       </td>
+                      <td className="py-3 px-3 text-right font-mono tabular-nums text-[var(--text-heading)] whitespace-nowrap">
+                        {order.competitorRate !== undefined && order.competitorRate !== '' ? order.competitorRate : '—'}
+                      </td>
+                      <td className="py-3 px-3 text-xs text-[var(--text-body)] whitespace-nowrap">{order.fmsName || '—'}</td>
                       <td className="py-3 px-3 whitespace-nowrap">
                         <LossReasonText reason={order.lossReason} />
                       </td>
-                      <td className="py-3 px-3 max-w-[180px]">
+                      <td className="py-3 px-3 max-w-[200px]">
                         <p className="text-xs text-[var(--text-muted)] line-clamp-1" title={order.orderNotes}>
                           {order.orderNotes || '—'}
                         </p>
                       </td>
                       <td className="py-3 px-3 text-xs font-mono text-[var(--text-muted)] whitespace-nowrap">
                         {formatShortDate(order.dateLost || order.orderDate) || '—'}
-                      </td>
-                      <td className="py-3 px-3 font-mono text-xs text-[var(--text-muted)] whitespace-nowrap">
-                        {order.timestamp ? formatDateTime(order.timestamp) : '—'}
                       </td>
                     </tr>
                   );
@@ -747,7 +846,7 @@ export function LostOrdersPage() {
         }}
       />
 
-      {/* Add Lost Order Modal */}
+      {/* Add Lost Order Modal: mirrors the "Order Not Received" Google Form */}
       {showAddModal && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center fin-modal-backdrop p-4"
@@ -755,287 +854,358 @@ export function LostOrdersPage() {
           aria-modal="true"
           aria-labelledby="add-order-title"
         >
-          <div className="fin-modal-panel max-w-[min(92vw,640px)] w-full max-h-[90dvh] flex flex-col overflow-hidden">
-            <div className="flex items-center justify-between px-5 sm:px-6 py-4 border-b border-[var(--border-subtle)] shrink-0">
-              <h2 id="add-order-title" className="text-base font-bold text-[var(--text-heading)]">
-                Log Lost Sales Order
-              </h2>
+          <div className="fin-modal-panel max-w-3xl w-full flex flex-col overflow-hidden anim-pop">
+            <div className="flex items-center justify-between gap-3 px-5 sm:px-6 py-4 border-b border-[var(--border-subtle)] shrink-0">
+              <div className="min-w-0">
+                <h2 id="add-order-title" className="text-base sm:text-lg font-bold text-[var(--text-heading)]">
+                  Order Not Received
+                </h2>
+                <p className="text-xs text-[var(--text-muted)] mt-0.5">Log a lost enquiry and why it went to a competitor</p>
+              </div>
               <button
                 type="button"
                 onClick={() => setShowAddModal(false)}
                 aria-label="Close lost order form"
-                className="p-1.5 rounded-[10px] text-[var(--text-muted)] hover:text-[var(--text-heading)] hover:bg-[var(--bg-surface-muted)]"
+                className="w-10 h-10 rounded-full inline-flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-heading)] hover:bg-[var(--bg-surface-muted)] shrink-0"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <form onSubmit={handleSubmit} noValidate className="p-5 sm:p-6 space-y-4 overflow-y-auto flex-1 min-h-0">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label
-                    htmlFor="lo-customer"
-                    className="block text-xs font-semibold text-[var(--text-body)] mb-1.5"
-                  >
-                    Customer Name *
-                  </label>
-                  <input
-                    id="lo-customer"
-                    type="text"
-                    value={customer}
-                    onChange={(e) => {
-                      setCustomer(e.target.value);
-                      setErrors((prev) => ({ ...prev, customer: '' }));
-                    }}
-                    placeholder="e.g. Titan Heavy Works"
-                    className="fin-input w-full px-3.5 text-sm"
-                  />
-                  {errors.customer && (
-                    <p
-                      className="text-xs mt-1"
-                      style={{ color: 'var(--status-danger-fg)' }}
-                      role="alert"
-                    >
-                      {errors.customer}
-                    </p>
-                  )}
-                </div>
+            <form
+              id="lost-order-form"
+              onSubmit={handleSubmit}
+              noValidate
+              className="p-4 sm:p-6 space-y-4 overflow-y-auto flex-1 min-h-0"
+            >
+              {/* Section 1 */}
+              <section className="sheet-section space-y-4" aria-labelledby="lo-sec-1">
+                <h3 id="lo-sec-1" className="flex items-center gap-2 text-sm font-bold text-[var(--text-heading)]">
+                  <span className="w-6 h-6 rounded-full bg-[var(--brand)] text-[#A3F046] text-[11px] font-mono flex items-center justify-center">1</span>
+                  Enquiry Details
+                </h3>
 
-                <div>
-                  <label
-                    htmlFor="lo-product"
-                    className="block text-xs font-semibold text-[var(--text-body)] mb-1.5"
-                  >
-                    Product Model *
-                  </label>
-                  <input
-                    id="lo-product"
-                    type="text"
-                    value={product}
-                    onChange={(e) => {
-                      setProduct(e.target.value);
-                      setErrors((prev) => ({ ...prev, product: '' }));
-                    }}
-                    placeholder="e.g. Check Valve HV-60"
-                    className="fin-input w-full px-3.5 text-sm"
-                  />
-                  {errors.product && (
-                    <p
-                      className="text-xs mt-1"
-                      style={{ color: 'var(--status-danger-fg)' }}
-                      role="alert"
-                    >
-                      {errors.product}
-                    </p>
-                  )}
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label
-                    htmlFor="lo-category"
-                    className="block text-xs font-semibold text-[var(--text-body)] mb-1.5"
-                  >
-                    Product Category *
-                  </label>
-                  <input
-                    id="lo-category"
-                    type="text"
-                    list="lo-category-list"
-                    value={category}
-                    onChange={(e) => {
-                      setCategory(e.target.value);
-                      setErrors((prev) => ({ ...prev, category: '' }));
-                    }}
-                    placeholder="e.g. Hydraulic Check Valves"
-                    className="fin-input w-full px-3.5 text-sm"
-                  />
-                  <datalist id="lo-category-list">
-                    {masters.categories.map((cat) => (
-                      <option key={cat.category} value={cat.category} />
-                    ))}
-                  </datalist>
-                  {errors.category && (
-                    <p
-                      className="text-xs mt-1"
-                      style={{ color: 'var(--status-danger-fg)' }}
-                      role="alert"
-                    >
-                      {errors.category}
-                    </p>
-                  )}
-                </div>
-
-                <div>
-                  <label
-                    htmlFor="lo-competitor"
-                    className="block text-xs font-semibold text-[var(--text-body)] mb-1.5"
-                  >
-                    Lost To Competitor *
-                  </label>
-                  <select
-                    id="lo-competitor"
-                    value={competitorId}
-                    onChange={(e) => {
-                      setCompetitorId(e.target.value);
-                      setErrors((prev) => ({ ...prev, competitorId: '' }));
-                    }}
-                    className="fin-input w-full px-3.5 text-sm"
-                  >
-                    {masters.competitors.length > 0 && <option value="">Select competitor...</option>}
-                    {masters.competitors.map((c) => (
-                      <option key={c.id || c.name} value={c.name || c.id}>
-                        {c.name || c.id}
-                      </option>
-                    ))}
-                    <option value="__new__">+ Add New Competitor</option>
-                  </select>
-                  {(competitorId === '__new__' || masters.competitors.length === 0) && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label htmlFor="lo-enquiry" className={labelCls}>Enquiry No Of FMS *</label>
                     <input
+                      id="lo-enquiry"
                       type="text"
-                      aria-label="New competitor name"
-                      value={newCompetitorName}
+                      value={enquiryNo}
                       onChange={(e) => {
-                        setNewCompetitorName(e.target.value);
-                        setErrors((prev) => ({ ...prev, competitorId: '' }));
+                        setEnquiryNo(e.target.value);
+                        clearErr('enquiryNo');
                       }}
-                      placeholder="Enter competitor name..."
-                      className="fin-input mt-2 w-full px-3.5 text-sm"
+                      autoComplete="off"
+                      className="fin-input w-full px-3.5 font-mono"
                     />
-                  )}
-                  {errors.competitorId && (
-                    <p
-                      className="text-xs mt-1"
-                      style={{ color: 'var(--status-danger-fg)' }}
-                      role="alert"
+                    {fieldError('enquiryNo')}
+                  </div>
+
+                  <div>
+                    <label htmlFor="lo-fms" className={labelCls}>Name Of FMS *</label>
+                    <select
+                      id="lo-fms"
+                      value={fmsName}
+                      onChange={(e) => {
+                        setFmsName(e.target.value);
+                        clearErr('fmsName');
+                      }}
+                      className="fin-input w-full px-3.5"
                     >
-                      {errors.competitorId}
-                    </p>
-                  )}
-                </div>
-              </div>
+                      <option value="">Choose...</option>
+                      {fmsOptions.map((o) => (
+                        <option key={o} value={o}>
+                          {o}
+                        </option>
+                      ))}
+                    </select>
+                    {fieldError('fmsName')}
+                  </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                <div>
-                  <label
-                    htmlFor="lo-value"
-                    className="block text-xs font-semibold text-[var(--text-body)] mb-1.5"
-                  >
-                    Order Value *
-                  </label>
-                  <input
-                    id="lo-value"
-                    type="number"
-                    min="1"
-                    step="100"
-                    value={orderValue}
-                    onChange={(e) => {
-                      setOrderValue(e.target.value);
-                      setErrors((prev) => ({ ...prev, orderValue: '' }));
-                    }}
-                    placeholder="45000"
-                    className="fin-input w-full px-3.5 text-sm font-mono"
-                  />
-                  {errors.orderValue && (
-                    <p
-                      className="text-xs mt-1"
-                      style={{ color: 'var(--status-danger-fg)' }}
-                      role="alert"
+                  <div>
+                    <label htmlFor="lo-firm" className={labelCls}>Firm Name *</label>
+                    <select
+                      id="lo-firm"
+                      value={firmChoice}
+                      onChange={(e) => {
+                        setFirmChoice(e.target.value);
+                        clearErr('firmName');
+                      }}
+                      className="fin-input w-full px-3.5"
                     >
-                      {errors.orderValue}
-                    </p>
-                  )}
-                </div>
+                      <option value="">Choose firm...</option>
+                      {firmOptions.map((f) => (
+                        <option key={f} value={f}>
+                          {f}
+                        </option>
+                      ))}
+                      <option value="__new__">+ Add New Firm</option>
+                    </select>
+                    {firmChoice === '__new__' && (
+                      <input
+                        type="text"
+                        aria-label="New firm name"
+                        value={newFirmName}
+                        onChange={(e) => {
+                          setNewFirmName(e.target.value);
+                          clearErr('firmName');
+                        }}
+                        className="fin-input mt-2 w-full px-3.5"
+                      />
+                    )}
+                    {fieldError('firmName')}
+                  </div>
 
-                <div>
-                  <label
-                    htmlFor="lo-reason"
-                    className="block text-xs font-semibold text-[var(--text-body)] mb-1.5"
-                  >
-                    Loss Reason *
-                  </label>
-                  <select
-                    id="lo-reason"
-                    value={lossReason}
-                    onChange={(e) => {
-                      setLossReason(e.target.value);
-                      setErrors((prev) => ({ ...prev, lossReason: '' }));
-                    }}
-                    className="fin-input w-full px-3.5 text-sm"
-                  >
-                    {lossReasonOptions.map((r) => (
-                      <option key={r} value={r}>
-                        {r}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+                  <div>
+                    <label htmlFor="lo-customer" className={labelCls}>Name Of Company *</label>
+                    <input
+                      id="lo-customer"
+                      type="text"
+                      value={customer}
+                      onChange={(e) => {
+                        setCustomer(e.target.value);
+                        clearErr('customer');
+                      }}
+                      className="fin-input w-full px-3.5"
+                    />
+                    {fieldError('customer')}
+                  </div>
 
-                <div>
-                  <label
-                    htmlFor="lo-date"
-                    className="block text-xs font-semibold text-[var(--text-body)] mb-1.5"
-                  >
-                    Date Lost *
-                  </label>
-                  <input
-                    id="lo-date"
-                    type="date"
-                    value={orderDate}
-                    onChange={(e) => {
-                      setOrderDate(e.target.value);
-                      setErrors((prev) => ({ ...prev, orderDate: '' }));
-                    }}
-                    className="fin-input w-full px-3.5 text-sm font-mono"
-                  />
-                  {errors.orderDate && (
-                    <p
-                      className="text-xs mt-1"
-                      style={{ color: 'var(--status-danger-fg)' }}
-                      role="alert"
+                  <div>
+                    <label htmlFor="lo-product" className={labelCls}>Product Name *</label>
+                    <input
+                      id="lo-product"
+                      type="text"
+                      value={product}
+                      onChange={(e) => {
+                        setProduct(e.target.value);
+                        clearErr('product');
+                      }}
+                      className="fin-input w-full px-3.5"
+                    />
+                    {fieldError('product')}
+                  </div>
+
+                  <div>
+                    <label htmlFor="lo-category" className={labelCls}>Product Category *</label>
+                    <input
+                      id="lo-category"
+                      type="text"
+                      list="lo-category-list"
+                      value={category}
+                      onChange={(e) => {
+                        setCategory(e.target.value);
+                        clearErr('category');
+                      }}
+                      className="fin-input w-full px-3.5"
+                    />
+                    <datalist id="lo-category-list">
+                      {masters.categories.map((cat) => (
+                        <option key={cat.category} value={cat.category} />
+                      ))}
+                    </datalist>
+                    <p className="text-[11px] text-[var(--text-muted)] mt-1">Decides which test parameters are used in Test 1.</p>
+                    {fieldError('category')}
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label htmlFor="lo-qty" className={labelCls}>Qty *</label>
+                      <input
+                        id="lo-qty"
+                        type="number"
+                        inputMode="decimal"
+                        min="1"
+                        value={qty}
+                        onChange={(e) => {
+                          setQty(e.target.value);
+                          clearErr('qty');
+                        }}
+                        className="fin-input w-full px-3.5 font-mono"
+                      />
+                      {fieldError('qty')}
+                    </div>
+                    <div>
+                      <label htmlFor="lo-date" className={labelCls}>Date Lost *</label>
+                      <input
+                        id="lo-date"
+                        type="date"
+                        value={orderDate}
+                        onChange={(e) => {
+                          setOrderDate(e.target.value);
+                          clearErr('orderDate');
+                        }}
+                        className="fin-input w-full px-2.5 font-mono"
+                      />
+                      {fieldError('orderDate')}
+                    </div>
+                  </div>
+
+                  <div className="sm:col-span-2">
+                    <label htmlFor="lo-value" className={labelCls}>Total Enquiry Value *</label>
+                    <input
+                      id="lo-value"
+                      type="number"
+                      inputMode="decimal"
+                      min="1"
+                      value={orderValue}
+                      onChange={(e) => {
+                        setOrderValue(e.target.value);
+                        clearErr('orderValue');
+                      }}
+                      className="fin-input w-full px-3.5 font-mono"
+                    />
+                    {fieldError('orderValue')}
+                  </div>
+                </div>
+              </section>
+
+              {/* Section 2 */}
+              <section className="sheet-section space-y-4" aria-labelledby="lo-sec-2">
+                <h3 id="lo-sec-2" className="flex items-center gap-2 text-sm font-bold text-[var(--text-heading)]">
+                  <span className="w-6 h-6 rounded-full bg-[var(--brand)] text-[#A3F046] text-[11px] font-mono flex items-center justify-center">2</span>
+                  Reason For Order Not Received
+                </h3>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label htmlFor="lo-competitor" className={labelCls}>Given To Whom (Competitor) *</label>
+                    <select
+                      id="lo-competitor"
+                      value={competitorId}
+                      onChange={(e) => {
+                        setCompetitorId(e.target.value);
+                        clearErr('competitorId');
+                      }}
+                      className="fin-input w-full px-3.5"
                     >
-                      {errors.orderDate}
+                      {masters.competitors.length > 0 && <option value="">Select competitor...</option>}
+                      {masters.competitors.map((c) => (
+                        <option key={c.id || c.name} value={c.name || c.id}>
+                          {c.name || c.id}
+                        </option>
+                      ))}
+                      <option value="__new__">+ Add New Competitor</option>
+                    </select>
+                    {(competitorId === '__new__' || masters.competitors.length === 0) && (
+                      <input
+                        type="text"
+                        aria-label="New competitor name"
+                        value={newCompetitorName}
+                        onChange={(e) => {
+                          setNewCompetitorName(e.target.value);
+                          clearErr('competitorId');
+                        }}
+                        className="fin-input mt-2 w-full px-3.5"
+                      />
+                    )}
+                    {fieldError('competitorId')}
+                  </div>
+
+                  <div>
+                    <label htmlFor="lo-rate" className={labelCls}>Rate (per unit) *</label>
+                    <input
+                      id="lo-rate"
+                      type="number"
+                      inputMode="decimal"
+                      min="0"
+                      step="any"
+                      value={competitorRate}
+                      onChange={(e) => {
+                        setCompetitorRate(e.target.value);
+                        clearErr('competitorRate');
+                      }}
+                      className="fin-input w-full px-3.5 font-mono"
+                    />
+                    {fieldError('competitorRate')}
+                  </div>
+
+                  <div className="sm:col-span-2">
+                    <label htmlFor="lo-reason" className={labelCls}>Main Loss Reason *</label>
+                    <select
+                      id="lo-reason"
+                      value={lossReason}
+                      onChange={(e) => {
+                        setLossReason(e.target.value);
+                        clearErr('lossReason');
+                      }}
+                      className="fin-input w-full px-3.5"
+                    >
+                      <option value="">Choose...</option>
+                      {lossReasonOptions.map((r) => (
+                        <option key={r} value={r}>
+                          {r}
+                        </option>
+                      ))}
+                    </select>
+                    {fieldError('lossReason')}
+                  </div>
+
+                  <div className="sm:col-span-2">
+                    <label htmlFor="lo-notes" className={labelCls}>Why Us Not Received Order *</label>
+                    <textarea
+                      id="lo-notes"
+                      rows={3}
+                      value={notes}
+                      onChange={(e) => {
+                        setNotes(e.target.value);
+                        clearErr('notes');
+                      }}
+                      className="fin-textarea w-full p-3.5"
+                    />
+                    {fieldError('notes')}
+                  </div>
+
+                  <div className="sm:col-span-2">
+                    <span id="lo-sample-label" className={labelCls}>Have To Take Sample? *</span>
+                    <div className="grid grid-cols-2 gap-2.5 max-w-sm" role="radiogroup" aria-labelledby="lo-sample-label">
+                      {(['Yes', 'No'] as const).map((opt) => (
+                        <button
+                          key={opt}
+                          type="button"
+                          role="radio"
+                          aria-checked={sampleRequired === opt}
+                          onClick={() => {
+                            setSampleRequired(opt);
+                            clearErr('sampleRequired');
+                          }}
+                          className="h-11 rounded-xl border text-sm font-semibold transition-colors"
+                          style={
+                            sampleRequired === opt
+                              ? { backgroundColor: 'var(--brand)', borderColor: 'var(--brand)', color: '#FFFFFF' }
+                              : { backgroundColor: 'var(--bg-surface)', borderColor: 'var(--border-subtle)', color: 'var(--text-body)' }
+                          }
+                        >
+                          {opt}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="text-[11px] text-[var(--text-muted)] mt-1.5">
+                      {sampleRequired === 'No'
+                        ? 'No sample: the order goes straight to History.'
+                        : 'Yes: the order waits in Active until you request the sample.'}
                     </p>
-                  )}
+                    {fieldError('sampleRequired')}
+                  </div>
                 </div>
-              </div>
-
-              <div>
-                <label
-                  htmlFor="lo-notes"
-                  className="block text-xs font-semibold text-[var(--text-body)] mb-1.5"
-                >
-                  Sales &amp; Field Notes
-                </label>
-                <textarea
-                  id="lo-notes"
-                  rows={3}
-                  value={notes}
-                  onChange={(e) => setNotes(e.target.value)}
-                  placeholder="Context from buyer feedback, pricing gap, or technical objections..."
-                  className="fin-textarea w-full p-3.5 text-sm"
-                />
-              </div>
-
-              <div className="flex items-center justify-end gap-2.5 pt-4 border-t border-[var(--border-subtle)]">
-                <button
-                  type="button"
-                  onClick={() => setShowAddModal(false)}
-                  className="fin-btn-secondary px-4 py-2 text-xs"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={submittingOrder}
-                  className="fin-btn-primary px-5 py-2 text-xs inline-flex items-center gap-1.5"
-                >
-                  {submittingOrder && <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />}
-                  {submittingOrder ? 'Saving...' : 'Save Lost Order'}
-                </button>
-              </div>
+              </section>
             </form>
+
+            <div className="shrink-0 bg-[var(--bg-surface)] border-t border-[var(--border-subtle)] px-4 sm:px-6 py-3 pb-safe sm:pb-3 grid grid-cols-2 sm:flex sm:justify-end gap-2.5">
+              <button type="button" onClick={() => setShowAddModal(false)} className="fin-btn-secondary h-11 px-5 text-sm">
+                Cancel
+              </button>
+              <button
+                type="submit"
+                form="lost-order-form"
+                disabled={submittingOrder}
+                className="fin-btn-primary h-11 px-5 text-sm inline-flex items-center justify-center gap-1.5"
+              >
+                {submittingOrder && <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />}
+                {submittingOrder ? 'Saving...' : 'Submit Order'}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -1202,6 +1372,7 @@ export function LostOrdersPage() {
                     }}
                     className="fin-input w-full px-3.5 text-sm"
                   >
+                    <option value="">Choose...</option>
                     {sourceTypeOptions.map((st) => (
                       <option key={st} value={st}>
                         {st}
@@ -1235,6 +1406,7 @@ export function LostOrdersPage() {
                     }}
                     className="fin-input w-full px-3.5 text-sm"
                   >
+                    <option value="">Choose...</option>
                     {priorityOptions.map((p) => (
                       <option key={p} value={p}>
                         {p}
@@ -1260,7 +1432,6 @@ export function LostOrdersPage() {
                       setSourceLocation(e.target.value);
                       setRequestErrors((prev) => ({ ...prev, sourceLocation: '' }));
                     }}
-                    placeholder="e.g. Apex Hardware, 410 Industrial Blvd, Chicago"
                     className="fin-input w-full px-3.5 text-sm"
                   />
                   {requestErrors.sourceLocation && (
@@ -1289,7 +1460,6 @@ export function LostOrdersPage() {
                       setResponsiblePerson(e.target.value);
                       setRequestErrors((prev) => ({ ...prev, responsiblePerson: '' }));
                     }}
-                    placeholder="Who will procure & deliver the sample"
                     className="fin-input w-full px-3.5 text-sm"
                   />
                   {requestErrors.responsiblePerson && (
@@ -1345,7 +1515,6 @@ export function LostOrdersPage() {
                   rows={3}
                   value={requestNotes}
                   onChange={(e) => setRequestNotes(e.target.value)}
-                  placeholder="Batch/lot preference, sealed-pack instructions, or courier handling notes..."
                   className="fin-textarea w-full p-3.5 text-sm"
                 />
               </div>

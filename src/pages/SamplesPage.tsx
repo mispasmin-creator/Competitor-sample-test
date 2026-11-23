@@ -80,7 +80,7 @@ export function SamplesPage() {
   // Request Sample form state
   const [selectedCaseId, setSelectedCaseId] = useState('');
   const [sampleName, setSampleName] = useState('');
-  const [qtyNeeded, setQtyNeeded] = useState('2');
+  const [qtyNeeded, setQtyNeeded] = useState('');
   const [sourceType, setSourceType] = useState('');
   const [sourceLocation, setSourceLocation] = useState('');
   const [responsiblePerson, setResponsiblePerson] = useState('');
@@ -94,8 +94,8 @@ export function SamplesPage() {
   const [receivingCase, setReceivingCase] = useState<LabCase | null>(null);
   const [receivedChoice, setReceivedChoice] = useState<'yes' | 'no'>('yes');
   const [receivedBy, setReceivedBy] = useState('');
-  const [receivedQty, setReceivedQty] = useState('1');
-  const [receiveCondition, setReceiveCondition] = useState('Sealed');
+  const [receivedQty, setReceivedQty] = useState('');
+  const [receiveCondition, setReceiveCondition] = useState('');
   const [conditionNotes, setConditionNotes] = useState('');
   const [receiveRemarks, setReceiveRemarks] = useState('');
   const [receiptPhotoUrl, setReceiptPhotoUrl] = useState<string | undefined>(undefined);
@@ -112,34 +112,23 @@ export function SamplesPage() {
     [cases]
   );
 
+  // Samples page owns Step 3 (receipt). Active = requested but not yet received;
+  // once a sample is received (Actual 3 stamped) it moves to History.
+  const isReceived = (c: LabCase) => Boolean(c.actual3) || c.status !== 'Requested';
+
   const activeSamples = useMemo(
-    () => allSamples.filter((c) => c.status !== 'Completed'),
-    [allSamples]
-  );
-
-  const historySamples = useMemo(
-    () => allSamples.filter((c) => c.status === 'Completed'),
-    [allSamples]
-  );
-
-  const receivePendingCount = useMemo(
-    () => cases.filter((c) => Number(c.pendingStageNo) === 3).length,
-    [cases]
-  );
-
-  const visibleSamples = useMemo(() => {
-    const base = activeTab === 'active' ? activeSamples : historySamples;
-    if (activeTab === 'active' && receivePendingOnly) {
-      return base
-        .filter((c) => Number(c.pendingStageNo) === 3)
+    () =>
+      allSamples
+        .filter((c) => !isReceived(c))
         .sort((a, b) =>
-          String(a.pendingPlanned || '9999-12-31').localeCompare(
-            String(b.pendingPlanned || '9999-12-31')
-          )
-        );
-    }
-    return base;
-  }, [activeTab, activeSamples, historySamples, receivePendingOnly]);
+          String(a.pendingPlanned || '9999-12-31').localeCompare(String(b.pendingPlanned || '9999-12-31'))
+        ),
+    [allSamples]
+  );
+
+  const historySamples = useMemo(() => allSamples.filter((c) => isReceived(c)), [allSamples]);
+
+  const visibleSamples = activeTab === 'active' ? activeSamples : historySamples;
 
   const [sampleSearch, setSampleSearch] = useState('');
 
@@ -190,12 +179,12 @@ export function SamplesPage() {
     const firstOrder = unrequestedOrders[0];
     setSelectedCaseId(firstOrder?.caseId ?? '');
     setSampleName(firstOrder?.product ?? '');
-    setQtyNeeded('2');
-    setSourceType(sourceTypeOptions[0] ?? 'Customer');
+    setQtyNeeded('');
+    setSourceType('');
     setSourceLocation('');
     setResponsiblePerson('');
     setExpectedDate('');
-    setPriority(priorityOptions.includes('Medium') ? 'Medium' : priorityOptions[0] ?? 'Medium');
+    setPriority('');
     setRequestNotes('');
     setRequestErrors({});
     setShowAddModal(true);
@@ -262,8 +251,8 @@ export function SamplesPage() {
     setReceivingCase(labCase);
     setReceivedChoice('yes');
     setReceivedBy(currentUser?.name ?? '');
-    setReceivedQty(String(labCase.qtyNeeded ?? 1));
-    setReceiveCondition(labCase.condition || conditionOptions[0] || 'Sealed');
+    setReceivedQty('');
+    setReceiveCondition('');
     setConditionNotes(labCase.conditionNotes || '');
     setReceiveRemarks('');
     setReceiptPhotoUrl(undefined);
@@ -330,136 +319,39 @@ export function SamplesPage() {
     }
   };
 
-  const renderCardActions = (sample: LabCase) => {
-    if (sample.status === 'Requested') {
-      return canEditSamples ? (
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            openReceiveModal(sample);
-          }}
-          className="fin-btn-primary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs whitespace-nowrap shrink-0"
-        >
-          <PackageCheck className="w-3.5 h-3.5" aria-hidden="true" />
-          <span>Receive Sample</span>
-        </button>
-      ) : null;
-    }
-
-    if (sample.status === 'Received') {
-      return canEditSamples && canViewTestEntry ? (
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            navigate(`/test-entry?sample=${sample.caseId}`);
-          }}
-          className="fin-btn-primary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs whitespace-nowrap shrink-0"
-        >
-          <FlaskConical className="w-3.5 h-3.5" aria-hidden="true" />
-          <span>Go to Test Entry</span>
-        </button>
-      ) : null;
-    }
-
-    if (sample.status === 'Testing') {
-      return canEditSamples && canViewTestEntry ? (
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            navigate(`/test-entry?sample=${sample.caseId}`);
-          }}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-[10px] transition-opacity hover:opacity-90 whitespace-nowrap shrink-0"
-          style={{
-            backgroundColor: 'var(--color-primary-soft)',
-            color: 'var(--color-primary)',
-          }}
-        >
-          <FlaskConical className="w-3.5 h-3.5" aria-hidden="true" />
-          <span>Continue Testing</span>
-        </button>
-      ) : null;
-    }
-
-    if (!canViewComparison && !canViewReports) {
-      return null;
-    }
-
-    return (
-      <div className="flex flex-wrap items-center gap-1.5">
-        {canViewComparison && (
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              navigate(`/comparison?sample=${sample.caseId}`);
-            }}
-            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold rounded-[10px] transition-opacity hover:opacity-90 whitespace-nowrap shrink-0"
-            style={{
-              backgroundColor: 'var(--status-success-bg)',
-              color: 'var(--status-success-fg)',
-            }}
-          >
-            <span>View Comparison</span>
-            <ArrowRight className="w-3 h-3" aria-hidden="true" />
-          </button>
-        )}
-        {canViewReports && (
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              navigate(`/reports?sample=${sample.caseId}`);
-            }}
-            className="fin-btn-secondary inline-flex items-center gap-1 px-2.5 py-1.5 text-xs whitespace-nowrap shrink-0"
-          >
-            <FileText className="w-3 h-3" aria-hidden="true" />
-            <span>View Report</span>
-          </button>
-        )}
-      </div>
-    );
-  };
-
   const viewOnly = !canEditSamples;
-  const canRequest = canEditSamples && unrequestedOrders.length > 0;
+  // Actions only exist on the Active tab (Receive Sample) and only for users who can edit.
+  const showActions = activeTab === 'active' && canEditSamples;
+
+  const receiveButton = (sample: LabCase, mobile = false) => (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        openReceiveModal(sample);
+      }}
+      className={
+        mobile
+          ? 'fin-btn-primary h-11 inline-flex items-center justify-center gap-1.5 text-sm'
+          : 'fin-btn-primary !min-h-9 h-9 inline-flex items-center gap-1.5 px-3.5 text-xs !rounded-full whitespace-nowrap'
+      }
+    >
+      <PackageCheck className={mobile ? 'w-4 h-4' : 'w-3.5 h-3.5'} aria-hidden="true" />
+      Receive Sample
+    </button>
+  );
 
   return (
     <div className="space-y-5">
-      <PageHeader
-        eyebrow="Directory"
-        title="Sample Tracking Pipeline"
-        viewOnly={viewOnly}
-        actions={
-          canEditSamples ? (
-            <button
-              type="button"
-              onClick={openRequestModal}
-              disabled={unrequestedOrders.length === 0}
-              title={unrequestedOrders.length === 0 ? 'Every lost order already has a sample' : undefined}
-              className="fin-btn-primary inline-flex items-center gap-2 px-4 text-sm"
-            >
-              <Plus className="w-4 h-4" aria-hidden="true" />
-              Request Sample
-            </button>
-          ) : undefined
-        }
-      />
+      <PageHeader eyebrow="Directory" title="Sample Tracking Pipeline" viewOnly={viewOnly} />
 
       <MobileBanner
-        label={activeTab === 'active' ? 'Active samples' : 'Completed samples'}
+        label={activeTab === 'active' ? 'Awaiting receipt' : 'Received samples'}
         count={searchedSamples.length}
-        caption={`${receivePendingCount} awaiting receipt · ${historySamples.length} completed`}
-        icon={<PackageCheck className="w-[18px] h-[18px]" />}
-        iconLabel={receivePendingOnly ? 'Show all active samples' : 'Show samples awaiting receipt'}
-        onIconClick={() => {
-          setActiveTab('active');
-          toggleReceivePending();
-        }}
-        onNew={canRequest ? openRequestModal : undefined}
-        newLabel="Request"
+        caption={`${activeSamples.length} awaiting receipt · ${historySamples.length} received`}
+        icon={activeTab === 'active' ? <History className="w-[18px] h-[18px]" /> : <Clock className="w-[18px] h-[18px]" />}
+        iconLabel={activeTab === 'active' ? 'Show received samples' : 'Show samples awaiting receipt'}
+        onIconClick={() => setActiveTab(activeTab === 'active' ? 'history' : 'active')}
         viewOnly={viewOnly}
       />
 
@@ -468,10 +360,7 @@ export function SamplesPage() {
         <SegmentedTabs
           ariaLabel="Sample view"
           value={activeTab}
-          onChange={(v) => {
-            setActiveTab(v);
-            if (v === 'history') setReceivePendingOnly(false);
-          }}
+          onChange={setActiveTab}
           options={[
             { value: 'active', label: 'Active', count: activeSamples.length, icon: <Clock className="w-3.5 h-3.5" /> },
             { value: 'history', label: 'History', count: historySamples.length, icon: <History className="w-3.5 h-3.5" /> },
@@ -491,54 +380,42 @@ export function SamplesPage() {
           />
         </div>
 
-        <div className="flex items-center gap-2">
-          {activeTab === 'active' && (
-            <button
-              type="button"
-              onClick={toggleReceivePending}
-              aria-pressed={receivePendingOnly}
-              className="inline-flex items-center gap-1.5 px-3.5 h-11 text-xs font-semibold rounded-full border transition-colors whitespace-nowrap"
-              style={
-                receivePendingOnly
-                  ? { backgroundColor: 'var(--brand)', color: '#FFFFFF', borderColor: 'var(--brand)' }
-                  : { backgroundColor: 'var(--bg-surface)', color: 'var(--text-body)', borderColor: 'var(--border-subtle)' }
-              }
-            >
-              Receive pending
-              <span className="font-mono">{receivePendingCount}</span>
-            </button>
-          )}
-          {(sampleSearch || receivePendingOnly) && (
-            <button
-              type="button"
-              onClick={() => {
-                setSampleSearch('');
-                if (receivePendingOnly) toggleReceivePending();
-              }}
-              className="inline-flex items-center gap-1 px-3 h-11 text-xs font-semibold text-[var(--color-primary)] whitespace-nowrap hover:underline"
-            >
-              <X className="w-3.5 h-3.5" aria-hidden="true" />
-              Clear filters
-            </button>
-          )}
-        </div>
+        {sampleSearch && (
+          <button
+            type="button"
+            onClick={() => setSampleSearch('')}
+            className="inline-flex items-center gap-1 px-3 h-11 text-xs font-semibold text-[var(--color-primary)] whitespace-nowrap hover:underline self-start lg:self-auto"
+          >
+            <X className="w-3.5 h-3.5" aria-hidden="true" />
+            Clear search
+          </button>
+        )}
       </div>
 
-      {/* Mobile: stacked detail cards */}
+      {/* Mobile: stacked detail cards (tap a card to open the full record) */}
       <div className="md:hidden space-y-3">
         {searchedSamples.length === 0 ? (
           <div className="feed-card">
             <EmptyState
               icon={<Package className="w-5 h-5" />}
-              title={receivePendingOnly ? 'No samples awaiting receipt' : sampleSearch ? 'No matching samples' : 'No samples here yet'}
-              hint={!sampleSearch && !receivePendingOnly && canRequest ? 'Request a sample for a lost order to start tracking it.' : undefined}
+              title={
+                sampleSearch
+                  ? 'No matching samples'
+                  : activeTab === 'active'
+                    ? 'No samples awaiting receipt'
+                    : 'No received samples yet'
+              }
+              hint={
+                !sampleSearch && activeTab === 'active'
+                  ? 'Samples are requested from the Lost Orders page.'
+                  : undefined
+              }
             />
           </div>
         ) : (
           paginatedSamples.map((sample) => {
             const comp = competitorMap.get(sample.competitorId);
-            const overdue = isCaseOverdue(sample);
-            const actionsNode = renderCardActions(sample);
+            const overdue = activeTab === 'active' && isCaseOverdue(sample);
             return (
               <FeedCard
                 key={sample.caseId}
@@ -551,33 +428,25 @@ export function SamplesPage() {
                 meta={[
                   { label: 'Competitor', value: comp?.name || sample.competitorName || '—' },
                   { label: 'Source', value: sample.sourceType || '—' },
-                  {
-                    label: overdue ? 'Overdue' : 'Due',
-                    value: (
-                      <span className="font-mono" style={overdue ? { color: 'var(--status-danger-fg)' } : undefined}>
-                        {formatShortDate(sample.pendingPlanned || sample.expectedDate) || '—'}
-                      </span>
-                    ),
-                  },
+                  activeTab === 'active'
+                    ? {
+                        label: overdue ? 'Overdue' : 'Due',
+                        value: (
+                          <span className="font-mono" style={overdue ? { color: 'var(--status-danger-fg)' } : undefined}>
+                            {formatShortDate(sample.pendingPlanned || sample.expectedDate) || '—'}
+                          </span>
+                        ),
+                      }
+                    : {
+                        label: 'Received',
+                        value: <span className="font-mono">{formatShortDate(sample.actual3) || '—'}</span>,
+                      },
                 ]}
                 progress={getCaseProgress(sample)}
                 progressTone={overdue ? 'danger' : 'brand'}
                 footerLeft={sample.responsiblePerson || sample.sourceLocation || '—'}
                 footerRight={<SampleStatusBadge status={sample.status} />}
-                actions={
-                  <>
-                    {actionsNode}
-                    <button
-                      type="button"
-                      onClick={() => setQrCase(sample)}
-                      aria-label={`QR label for ${sample.sampleCode || sample.caseId}`}
-                      className="fin-btn-secondary h-11 inline-flex items-center justify-center gap-1.5 text-sm"
-                    >
-                      <QrCode className="w-4 h-4" aria-hidden="true" />
-                      QR Label
-                    </button>
-                  </>
-                }
+                actions={showActions ? receiveButton(sample, true) : undefined}
               />
             );
           })
@@ -587,69 +456,52 @@ export function SamplesPage() {
       {/* Desktop: glass table */}
       <div className="hidden md:block fin-card p-4 lg:p-5">
         <div className="fin-table-wrap">
-          <table className="w-full min-w-[820px] text-left border-collapse">
+          <table className="w-full min-w-[760px] text-left border-collapse">
             <thead>
               <tr className="fin-table-head text-[11px] uppercase">
-                <th className="py-3 px-4 rounded-l-xl whitespace-nowrap">Actions</th>
-                <th className="py-3 px-4 whitespace-nowrap">Sample ID</th>
+                {showActions && <th className="py-3 px-4 rounded-l-xl whitespace-nowrap">Actions</th>}
+                <th className={`py-3 px-4 whitespace-nowrap ${showActions ? '' : 'rounded-l-xl'}`}>Sample ID</th>
                 <th className="py-3 px-4 whitespace-nowrap">Sample &amp; Case</th>
                 <th className="py-3 px-4 whitespace-nowrap">Competitor</th>
                 <th className="py-3 px-4 whitespace-nowrap">Source &amp; Collector</th>
-                <th className="py-3 px-4 whitespace-nowrap">Planned / Expected</th>
+                <th className="py-3 px-4 whitespace-nowrap">{activeTab === 'active' ? 'Planned / Expected' : 'Received On'}</th>
                 <th className="py-3 px-4 rounded-r-xl whitespace-nowrap">Status</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[var(--border-subtle)] text-sm">
               {searchedSamples.length === 0 ? (
                 <tr>
-                  <td colSpan={7}>
+                  <td colSpan={showActions ? 7 : 6}>
                     <EmptyState
                       icon={<Package className="w-5 h-5" />}
                       title={
-                        receivePendingOnly
-                          ? 'No samples currently awaiting receipt'
-                          : sampleSearch
-                            ? 'No matching samples'
-                            : 'No competitor samples here yet'
+                        sampleSearch
+                          ? 'No matching samples'
+                          : activeTab === 'active'
+                            ? 'No samples awaiting receipt'
+                            : 'No received samples yet'
                       }
+                      hint={!sampleSearch && activeTab === 'active' ? 'Samples are requested from the Lost Orders page.' : undefined}
                     />
                   </td>
                 </tr>
               ) : (
                 paginatedSamples.map((sample) => {
                   const comp = competitorMap.get(sample.competitorId);
-                  const overdue = isCaseOverdue(sample);
-                  const actionsNode = renderCardActions(sample);
+                  const overdue = activeTab === 'active' && isCaseOverdue(sample);
                   return (
                     <tr
                       key={sample.caseId}
                       onClick={() => setDetailCase(sample)}
+                      title="Open case details"
                       className="cursor-pointer fin-table-row"
                       style={overdue ? { backgroundColor: 'var(--status-danger-bg)' } : undefined}
                     >
-                      <td className="py-3 px-4 whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
-                        <div className="inline-flex items-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => setDetailCase(sample)}
-                            aria-label={`View details for ${sample.caseId}`}
-                            title="View case details"
-                            className="w-9 h-9 rounded-full inline-flex items-center justify-center border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--color-primary)] hover:bg-[var(--mint)] transition-colors"
-                          >
-                            <Eye className="w-4 h-4" aria-hidden="true" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setQrCase(sample)}
-                            aria-label={`QR label for ${sample.sampleCode || sample.caseId}`}
-                            title="Print / view QR code"
-                            className="w-9 h-9 rounded-full inline-flex items-center justify-center border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--color-primary)] hover:bg-[var(--mint)] transition-colors"
-                          >
-                            <QrCode className="w-4 h-4" aria-hidden="true" />
-                          </button>
-                          {actionsNode}
-                        </div>
-                      </td>
+                      {showActions && (
+                        <td className="py-3 px-4 whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                          {receiveButton(sample)}
+                        </td>
+                      )}
                       <td className="py-3 px-4 font-mono text-xs font-bold text-[var(--color-primary)] whitespace-nowrap">
                         {sample.sampleCode || sample.caseId}
                       </td>
@@ -669,18 +521,24 @@ export function SamplesPage() {
                           {sample.responsiblePerson ? ` · ${sample.responsiblePerson}` : ''}
                         </p>
                       </td>
-                      <td
-                        className="py-3 px-4 text-xs font-mono whitespace-nowrap"
-                        style={{
-                          color: overdue ? 'var(--status-danger-fg)' : 'var(--text-muted)',
-                          fontWeight: overdue ? 700 : 500,
-                        }}
-                      >
-                        <div>{formatShortDate(sample.pendingPlanned || sample.expectedDate)}</div>
-                        <div className="mt-1">
-                          <OverdueChip delayDays={sample.pendingDelay} />
-                        </div>
-                      </td>
+                      {activeTab === 'active' ? (
+                        <td
+                          className="py-3 px-4 text-xs font-mono whitespace-nowrap"
+                          style={{
+                            color: overdue ? 'var(--status-danger-fg)' : 'var(--text-muted)',
+                            fontWeight: overdue ? 700 : 500,
+                          }}
+                        >
+                          <div>{formatShortDate(sample.pendingPlanned || sample.expectedDate)}</div>
+                          <div className="mt-1">
+                            <OverdueChip delayDays={sample.pendingDelay} />
+                          </div>
+                        </td>
+                      ) : (
+                        <td className="py-3 px-4 text-xs font-mono whitespace-nowrap text-[var(--text-muted)]">
+                          {formatShortDate(sample.actual3) || '—'}
+                        </td>
+                      )}
                       <td className="py-3 px-4 whitespace-nowrap">
                         <SampleStatusBadge status={sample.status} />
                       </td>
@@ -830,6 +688,7 @@ export function SamplesPage() {
                     onChange={(e) => setSourceType(e.target.value)}
                     className="fin-input w-full px-3.5 text-sm"
                   >
+                    <option value="">Choose...</option>
                     {sourceTypeOptions.map((st) => (
                       <option key={st} value={st}>
                         {st}
@@ -851,6 +710,7 @@ export function SamplesPage() {
                     onChange={(e) => setPriority(e.target.value)}
                     className="fin-input w-full px-3.5 text-sm"
                   >
+                    <option value="">Choose...</option>
                     {priorityOptions.map((p) => (
                       <option key={p} value={p}>
                         {p}
@@ -1154,7 +1014,6 @@ export function SamplesPage() {
                       setReceiveRemarks(e.target.value);
                       setReceiveErrors((prev) => ({ ...prev, remarks: '' }));
                     }}
-                    placeholder="Explain delivery delay, missing courier package, or rejection reason..."
                     className="fin-textarea w-full p-3.5 text-sm"
                   />
                   {receiveErrors.remarks && (
@@ -1244,6 +1103,7 @@ export function SamplesPage() {
                         }}
                         className="fin-input w-full px-3.5 text-sm"
                       >
+                        <option value="">Choose...</option>
                         {conditionOptions.map((cond) => (
                           <option key={cond} value={cond}>
                             {cond}
@@ -1274,7 +1134,6 @@ export function SamplesPage() {
                       rows={2}
                       value={conditionNotes}
                       onChange={(e) => setConditionNotes(e.target.value)}
-                      placeholder="Packaging integrity, seal condition, lot stamp, visible damage..."
                       className="fin-textarea w-full p-3.5 text-sm"
                     />
                   </div>
@@ -1331,7 +1190,6 @@ export function SamplesPage() {
                       rows={2}
                       value={receiveRemarks}
                       onChange={(e) => setReceiveRemarks(e.target.value)}
-                      placeholder="Additional lab intake remarks..."
                       className="fin-textarea w-full p-3.5 text-sm"
                     />
                   </div>
@@ -1358,7 +1216,7 @@ export function SamplesPage() {
                     ? 'Saving...'
                     : receivedChoice === 'yes'
                       ? canViewTestEntry
-                        ? 'Confirm Receipt & Open Test Entry'
+                        ? 'Confirm Receipt & Open Test 1'
                         : 'Confirm Receipt'
                       : 'Save Not Received Status'}
                 </button>

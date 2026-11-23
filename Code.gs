@@ -7,21 +7,44 @@
  *  - Pending status:
  *      Planned 2 filled & Actual 2 empty -> Stage 2 (Request Sample)
  *      Planned 3 filled & Actual 3 empty -> Stage 3 (Sample Received)
- *      Planned 4 filled & Actual 4 empty -> Stage 4 (Test Entry)
+ *      Planned 4 filled & Actual 4 empty -> Stage 4 (Test 1)
  *  - Case-insensitive sheet matching for FMS/Fms, Masters/Master, Users/users.
  *  - Password column stores plain text (legacy SHA-256 hashes are still accepted at login).
  * Setup: run setup() once, then Deploy > Web app (Execute as Me, Access Anyone). After edits: Deploy > Manage > New version.
  */
 const T = { fms: 'FMS', users: 'Users', masters: 'Masters' }, ID = 'caseId', HR = 5, DR = 6, FOLDER = 'Competitor Sample Lab Files', FOLDER_ID = '1YUOnNQb5lwDQWHSNnuqM69If0W-NHMqP';
 const DERIVED = ['pendingStageNo', 'pendingStage', 'pendingPlanned', 'pendingDelay', 'totalDelay'];
-const PAGES = ['dashboard', 'lostOrders', 'samples', 'templates', 'testEntry', 'comparison', 'reports', 'competitors'];
+const PAGES = ['dashboard', 'lostOrders', 'samples', 'templates', 'testEntry', 'management', 'comparison', 'reports', 'competitors'];
 const FMS_HEAD = 'Timestamp|Case ID|Customer|Product|Category|Order Value|Competitor|Loss Reason|Order Notes|Date Lost|Sample Code|Sample Name|Qty Needed|Source Type|Source Location|Responsible Person|Expected Date|Priority|Request Notes|Requested By|Planned 2|Actual 2|Received By|Received Qty|Condition|Condition Notes|Photo Link|Receive Remarks|Planned 3|Actual 3|Tested By|Test Results (JSON)|Pass Count|Fail Count|Overall Result|Attachment Links|Planned 4|Actual 4|Approval Status|Approved By|Manager Comment|Verdict Override|Planned 5|Actual 5|Pending Stage No|Pending Stage|Pending Planned|Pending Delay|Total Delay'.split('|');
-const MASTERS = [
-  ['Competitors', 'Name'], ['Categories', 'Category'],
-  ['Loss Reasons', 'Value', ['Price', 'Quality', 'Delivery', 'Other']], ['Source Types', 'Value', ['Customer', 'Market', 'Dealer', 'Online', 'Other']],
-  ['Conditions', 'Value', ['Sealed', 'Opened', 'Damaged', 'Expired']], ['Priorities', 'Value', ['Low', 'Medium', 'High']]
-];
-let _B = null, _F = null, _UC = null, _U = null, _W = []; // per-execution caches + warnings
+const FMS_NAMES = ['NBD & NBD OF CRR FMS', 'CRR ENQUIRY'];
+// FMS headings that follow the "Order Not Received" Google Form wording -> internal field keys.
+// Applied only when the internal key's own column is not present, so older sheets keep working.
+const FMS_ALIASES = {
+  enquiryNoOfFms: 'enquiryNo',
+  nameOfCompany: 'customer',
+  productName: 'product',
+  nameOfFms: 'fmsName',
+  totalEnquiryValue: 'orderValue',
+  givenToWhom: 'competitor',
+  rate: 'competitorRate',
+  whyUsNotReceivedOrder: 'orderNotes',
+  haveToTakeSample: 'sampleRequired',
+  // Test 2 (Step 5) headings used in the FMS tab
+  testStatus1: 'test2Status',
+  dateOfTest1: 'dateOfTest2',
+  testedBy1: 'testedBy2',
+  testRemark: 'test2Remarks'
+};
+function aliasFms_(m, l) {
+  Object.keys(FMS_ALIASES).forEach(a => {
+    const k = FMS_ALIASES[a];
+    if (m[a] && !m[k]) { m[k] = m[a]; l[k] = l[a]; delete m[a]; delete l[a]; }
+  });
+}
+const CASE_STATUSES = ['No Sample', 'Requested', 'Received', 'Testing', 'Completed'];
+const DEFAULT_LISTS = { lossReasons: ['Price', 'Quality', 'Delivery', 'Other'], sourceTypes: ['Customer', 'Market', 'Dealer', 'Online', 'Other'], conditions: ['Sealed', 'Opened', 'Damaged', 'Expired'], priorities: ['Low', 'Medium', 'High'] };
+// per-execution caches: Masters blocks/values/lists, FMS ctx, Users ctx/list, array-formula cols; _MD = Masters changed; _W = warnings
+let _B = null, _MV = null, _M = null, _MD = false, _F = null, _A = null, _UC = null, _U = null, _W = [];
 
 /* ---------------- helpers ---------------- */
 const ss = () => SpreadsheetApp.getActiveSpreadsheet();
@@ -75,27 +98,28 @@ const stageOf_ = (m, col) => { const st = stages_(m); for (const n of st) if (co
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('Competitor Lab').addItem('Setup / Repair tabs', 'setup')
     .addItem('Fix formulas & formatting (after changing columns)', 'repairFormulas')
+    .addItem('Add Google Form dropdowns to Masters', 'addFormMasters')
+    .addItem('Setup Lab Test columns & dropdowns', 'setupLabTest')
     .addItem('Check structure', 'checkStructure')
     .addItem('Reset admin password to admin123', 'resetAdminPassword').addToUi();
 }
 
+const resetCaches_ = () => { _B = _MV = _M = _F = _A = _UC = _U = null; _MD = false; };
+
+// Default Masters blocks for a new sheet + the Google Form "Pasmin Order Not Received Form" dropdowns.
+const BASE_MASTERS = [
+  ['Competitors', [], ['ID', 'Name']], ['Categories', [], ['Category']],
+  ['Loss Reasons', DEFAULT_LISTS.lossReasons], ['Source Types', DEFAULT_LISTS.sourceTypes],
+  ['Conditions', DEFAULT_LISTS.conditions], ['Priorities', DEFAULT_LISTS.priorities]
+];
+const FORM_MASTERS = [['Firm Names', []], ['FMS Names', FMS_NAMES], ['Have To Take Sample', ['Yes', 'No']]];
+
 function setup() {
-  const pr = PropertiesService.getScriptProperties();
-  if (!pr.getProperty('PW_SALT')) pr.setProperty('PW_SALT', Utilities.getUuid() + Utilities.getUuid());
   let f = sheet(T.fms);
   if (!f) { const a = ss().getSheets()[0]; if (ss().getSheets().length === 1 && !a.getLastRow()) { a.setName(T.fms); f = a; } else f = ss().insertSheet(T.fms); }
-  const u = sheet(T.users) || ss().insertSheet(T.users), m = sheet(T.masters) || ss().insertSheet(T.masters);
-  if (!m.getLastRow()) {
-    const flatHeaders = ['Competitor', 'Category', 'Loss Reason', 'Source Type', 'Condition', 'Priority', 'Responsible Person'];
-    const sampleRows = [
-      ['ABC Hydraulics', 'Hydraulic Check Valves', 'Price', 'Customer', 'Sealed', 'Low', 'Admin'],
-      ['XYZ Fluid Controls', 'Directional Valves', 'Quality', 'Market', 'Opened', 'Medium', 'Lab Incharge'],
-      ['Bosch Rexroth', 'Proportional Valves', 'Delivery', 'Dealer', 'Damaged', 'High', ''],
-      ['Parker Hannifin', 'Cartridge Valves', 'Other', 'Online', 'Expired', '', '']
-    ];
-    m.getRange(1, 1, 1, flatHeaders.length).setValues([flatHeaders]).setFontWeight('bold');
-    m.getRange(2, 1, sampleRows.length, flatHeaders.length).setValues(sampleRows);
-  }
+  const u = sheet(T.users) || ss().insertSheet(T.users);
+  if (!sheet(T.masters)) ss().insertSheet(T.masters);
+  ensureBlocks_(BASE_MASTERS);
   if (!u.getLastRow()) {
     const h = ['id', 'name', 'username', 'password', 'isAdmin', 'isActive'].concat(PAGES.map(p => 'perm_' + p), ['createdAt', 'lastLoginAt']);
     const r = { id: 'usr-admin', name: 'Administrator', username: 'admin', password: plain_('admin123'), isAdmin: true, isActive: true, createdAt: new Date() };
@@ -108,6 +132,199 @@ function setup() {
   try { SpreadsheetApp.getUi().alert('Setup complete. Default login: admin / admin123'); } catch (e) { /* no UI */ }
 }
 
+function addFormMasters() {
+  const added = ensureBlocks_(FORM_MASTERS);
+  const msg = added.length ? 'Added to Masters: ' + added.join(', ') + (added.indexOf('Firm Names') >= 0 ? '\nFill your firm names under "Firm Names" from row 3.' : '') : 'All Google Form dropdowns already exist in Masters.';
+  try { SpreadsheetApp.getUi().alert(msg); } catch (e) { /* no UI */ }
+  return msg;
+}
+
+/* ---------------- Lab Test form (Enter Test) ---------------- */
+// [key, FMS heading, required when Tested]
+const LAB_FIELDS = [
+  ['wcPercentage', 'WC Percentage', true],
+  ['initialSettingTime', 'Initial Setting Time', false],
+  ['finalSettingTime', 'Final Setting Time', false],
+  ['flowOfMaterial', 'Flow Of Material', true],
+  ['whatToBeMixed', 'What To Be Mixed', false],
+  ['sieveAnalysis', 'Sieve Analysis', false]
+];
+// Test 2 (Step 5) — physical test fields, saved from the Test 2 page.
+const LAB2_FIELDS = [
+  ['bdAt110C', 'BD at 110°C', true],
+  ['ccsAt100C', 'CCS at 100°C', true],
+  ['bdAt1100C', 'BD at 1100°C', true],
+  ['ccsAt1100C', 'CCS at 1100°C', true],
+  ['plcAt1100C', 'PLC at 1100°C', true]
+];
+const LAB_COLUMNS = [['testStatus', 'Test Status'], ['dateOfTest', 'Date Of Test'], ['testedBy', 'Tested By']]
+  .concat(LAB_FIELDS.map(f => [f[0], f[1]]), [['testRemarks', 'Test Remarks']],
+    [['planned5', 'Planned 5'], ['actual5', 'Actual 5'], ['test2Status', 'Test 2 Status'], ['dateOfTest2', 'Date Of Test 2'], ['testedBy2', 'Tested By 2']],
+    LAB2_FIELDS.map(f => [f[0], f[1]]), [['test2Remarks', 'Test 2 Remarks']]);
+const LAB_SKIP_STATUSES = ['non tested', 'direct supply'];
+const LAB_MASTERS = [
+  ['Test Status', ['Tested', 'Non Tested', 'Direct supply']],
+  ['Tested By', []],
+  ['Flow Of Material', []]
+];
+
+// Adds missing Masters blocks (never touches existing ones). Returns the titles added.
+// list = [[title, values, headings = ['Value']]]
+function ensureBlocks_(list) {
+  const sh = sheet(T.masters) || ss().insertSheet(T.masters);
+  mastersChanged_();
+  const have = blocks_(), added = [];
+  let col = sh.getLastColumn() ? sh.getLastColumn() + 2 : 1;
+  list.forEach(([title, values, heads]) => {
+    if (have[key_(title)]) return;
+    heads = heads || ['Value'];
+    sh.getRange(1, col).setValue(title).setFontWeight('bold');
+    sh.getRange(2, col, 1, heads.length).setValues([heads]).setFontWeight('bold');
+    if (values.length) sh.getRange(3, col, values.length, 1).setValues(values.map(v => [v]));
+    added.push(title); col += heads.length + 1;
+  });
+  mastersChanged_();
+  return added;
+}
+
+// Menu: adds the Lab Test columns at the END of the FMS header row + the Masters dropdown blocks.
+function setupLabTest() {
+  resetCaches_();
+  const c = fms_(), added = [];
+  let col = c.sh.getLastColumn() + 1;
+  LAB_COLUMNS.forEach(([k, h]) => {
+    if (c.m[k]) return;
+    c.sh.getRange(c.hr, col).setValue(h).setFontWeight('bold');
+    added.push(h); col++;
+  });
+  _F = null;
+  if (added.length) repairFormulas(); // formats + pending-stage formulas (Planned columns stay the sheet's own)
+  _F = null;
+  const blocks = ensureBlocks_(LAB_MASTERS);
+  const msg = (added.length ? 'FMS columns added at the end: ' + added.join(', ') : 'All Lab Test columns already exist in FMS.') +
+    '\n' + (blocks.length ? 'Masters blocks added: ' + blocks.join(', ') + '\nFill technician names under "Tested By" and options under "Flow Of Material" from row 3.' : 'Masters blocks already exist.');
+  try { SpreadsheetApp.getUi().alert(msg); } catch (e) { /* no UI */ }
+  return msg;
+}
+
+function saveLabTest_(u, p) {
+  const { c, o } = open_(u, p, 'testEntry', 4);
+  const has = v => v !== undefined && v !== null && String(v).trim() !== '';
+  const status = String(p.testStatus || '').trim();
+  if (!status) throw new Error('Status is required.');
+  const skip = LAB_SKIP_STATUSES.indexOf(status.toLowerCase()) >= 0;
+  const lab = p.lab || {};
+  const rec = { testStatus: status };
+  let results = [], pass = 0, fail = 0;
+
+  if (skip) {
+    if (!has(p.testRemarks)) throw new Error('Remark is required.');
+    // Never drop the remark silently: the sheet needs a column for it.
+    if (!c.m.testRemarks) throw new Error('Add a "Test Remarks" column in the FMS tab to save the remark for "' + status + '".');
+    rec.testRemarks = String(p.testRemarks).trim();
+    rec.dateOfTest = null;
+    rec.testedBy = null;
+    LAB_FIELDS.forEach(([k]) => { rec[k] = null; });
+    rec.overallResult = status;
+  } else {
+    if (!has(p.dateOfTest)) throw new Error('Date of Test is required.');
+    if (!has(p.testedBy)) throw new Error('Tested By is required.');
+    LAB_FIELDS.forEach(([k, h, req]) => {
+      if (req && !has(lab[k])) throw new Error(h + ' is required.');
+      rec[k] = has(lab[k]) ? String(lab[k]).trim() : '';
+    });
+    rec.dateOfTest = String(p.dateOfTest).slice(0, 10);
+    rec.testedBy = String(p.testedBy).trim();
+    if (c.m.testRemarks) rec.testRemarks = null; // clear an old remark; skip quietly when there is no column
+    // Category template parameters (Test Templates) — optional, Pass/Fail as before.
+    const params = readBlock_('parameters').filter(x => x.category === o.category);
+    const inp = Object.fromEntries((p.results || []).map(r => [r.parameterId, r]));
+    results = params.map(x => {
+      const raw = inp[x.parameterId]; let v = null, ok = null;
+      if (raw && has(raw.measuredValue)) {
+        v = Number(raw.measuredValue);
+        if (isNaN(v)) throw new Error('Invalid number for ' + x.name);
+        ok = v >= +x.minValue && v <= +x.maxValue;
+        ok ? pass++ : fail++;
+      }
+      return { parameterId: x.parameterId, name: x.name, unit: x.unit, min: +x.minValue, max: +x.maxValue, standard: +x.ourStandardValue, higherIsBetter: bool_(x.higherIsBetter), measuredValue: v, passed: ok, notes: (raw && raw.notes) || '' };
+    });
+    if (results.some(r => r.measuredValue === null)) throw new Error('Enter valid measurements for all ' + results.length + ' template parameters.');
+    rec.overallResult = results.length ? (fail ? 'Fail' : 'Pass') : status;
+  }
+  rec.passCount = pass;
+  rec.failCount = fail;
+  const resKey = c.m.testResultsJson ? 'testResultsJson' : 'testResults';
+  rec[resKey] = results;
+
+  const files = parse_(o.attachmentLinks || o.attachments || '', []);
+  (p.attachments || []).forEach(a => files.push({ name: a.name, url: saveFile_(a.dataUrl, a.name, o.sampleCode || o.caseId), uploadedAt: nowIso_() }));
+  if ((p.attachments || []).length || c.m.attachmentLinks || c.m.attachments) rec[c.m.attachmentLinks ? 'attachmentLinks' : 'attachments'] = files;
+
+  // Optional summary columns: skip quietly when the sheet doesn't have them.
+  ['passCount', 'failCount', 'overallResult', resKey, 'attachmentLinks', 'attachments'].forEach(k => { if (rec[k] !== undefined && !c.m[k]) delete rec[k]; });
+  put_(c, o.row, [rec], 4); // stamps Actual 4 = Test 1 completion
+  // Direct supply skips the remaining test stage (Test 2 / Step 5): mark it done today.
+  if (status.toLowerCase() === 'direct supply' && c.m.actual5 && !o.actual5) {
+    const skipRec = { test2Status: 'Direct supply', test2Remarks: rec.testRemarks };
+    Object.keys(skipRec).forEach(k => { if (!c.m[k]) delete skipRec[k]; });
+    put_(c, o.row, [skipRec], 5);
+  }
+}
+
+// Step 5: Test 2 (physical test) from the Test 2 page.
+function saveLabTest2_(u, p) {
+  const c0 = fms_();
+  if (!c0.m.actual5) throw new Error('Test 2 columns are missing. Run "Competitor Lab → Setup Lab Test columns & dropdowns" in the sheet.');
+  const { c, o } = open_(u, p, 'testEntry', 5);
+  if (!o.actual4) throw new Error('Test 1 (Test 1) is not completed yet.');
+  const has = v => v !== undefined && v !== null && String(v).trim() !== '';
+  const status = String(p.testStatus || '').trim();
+  if (!status) throw new Error('Status is required.');
+  const skip = LAB_SKIP_STATUSES.indexOf(status.toLowerCase()) >= 0;
+  const lab = p.lab || {};
+  const rec = { test2Status: status };
+  if (skip) {
+    if (!has(p.testRemarks)) throw new Error('Remark is required.');
+    rec.test2Remarks = String(p.testRemarks).trim();
+    rec.dateOfTest2 = null;
+    rec.testedBy2 = null;
+    LAB2_FIELDS.forEach(([k]) => { rec[k] = null; });
+  } else {
+    if (!has(p.dateOfTest)) throw new Error('Date of Test is required.');
+    if (!has(p.testedBy)) throw new Error('Tested By is required.');
+    LAB2_FIELDS.forEach(([k, h, req]) => {
+      if (req && !has(lab[k])) throw new Error(h + ' is required.');
+      rec[k] = has(lab[k]) ? String(lab[k]).trim() : '';
+    });
+    rec.dateOfTest2 = String(p.dateOfTest).slice(0, 10);
+    rec.testedBy2 = String(p.testedBy).trim();
+    rec.test2Remarks = has(p.testRemarks) ? String(p.testRemarks).trim() : ''; // optional remark when Tested
+  }
+  put_(c, o.row, [rec], 5); // stamps Actual 5 = Test 2 completion
+}
+
+// Step 6: Management Action page -> Remark 6, Delay 6, Actual 6. Planned 6 is the sheet's formula and is never written.
+function saveManagement_(u, p) {
+  const c0 = fms_();
+  if (!c0.m.actual6) throw new Error('Add an "Actual 6" column in the FMS tab for Management Action.');
+  const { c, o } = open_(u, p, 'management', 6);
+  if (!String(p.remark6 || '').trim()) throw new Error('Remark is required.');
+  if (!c.m.remark6) throw new Error('Add a "Remark 6" column in the FMS tab to save the remark.');
+  const rec = { remark6: String(p.remark6).trim() };
+  // Delay 6 = working days late (Sunday off), like NETWORKDAYS.INTL(Planned 6, today, 11) - 1. Skipped if the cell has a formula.
+  if (c.m.delay6) rec.delay6 = delayDays_(o.planned6, new Date());
+  put_(c, o.row, [rec], 6);
+}
+function delayDays_(planned, done) {
+  const p = planned ? new Date(planned) : null;
+  if (!p || isNaN(p)) return 0;
+  const d0 = new Date(p.getFullYear(), p.getMonth(), p.getDate()), d1 = new Date(done.getFullYear(), done.getMonth(), done.getDate());
+  let n = 0;
+  for (let d = new Date(d0); d <= d1; d.setDate(d.getDate() + 1)) if (d.getDay() !== 0) n++;
+  return Math.max(n - 1, 0);
+}
+
 function resetAdminPassword() {
   const pr = PropertiesService.getScriptProperties();
   if (!pr.getProperty('PW_SALT')) pr.setProperty('PW_SALT', Utilities.getUuid() + Utilities.getUuid());
@@ -118,7 +335,7 @@ function resetAdminPassword() {
 }
 
 function checkStructure() {
-  _B = _F = _UC = _U = null; const out = [];
+  resetCaches_(); const out = [];
   try { const c = fms_(); out.push('FMS header row ' + c.hr + ', data from row ' + c.dr + ' | stages: ' + (stages_(c.m).join(', ') || 'none') + ' | columns: ' + Object.keys(c.m).length); } catch (e) { out.push('FMS problem: ' + e.message); }
   try { out.push('Users permission columns: ' + Object.keys(usersCtx_().pk).join(', ')); } catch (e) { out.push('Users problem: ' + e.message); }
   try { out.push('Masters blocks: ' + Object.keys(blocks_()).join(', ')); } catch (e) { out.push('Masters problem: ' + e.message); }
@@ -129,11 +346,9 @@ function checkStructure() {
 function blocks_() {
   if (_B) return _B;
   _B = {};
-  const sh = sheet(T.masters);
-  if (!sh) return _B;
-  const lc = sh.getLastColumn();
-  if (!lc) return _B;
-  const r1 = sh.getRange(1, 1, 1, lc).getValues()[0], r2 = sh.getRange(2, 1, 1, lc).getValues()[0];
+  const v = mv_();
+  if (v.length < 2) return _B;
+  const r1 = v[0], r2 = v[1], lc = r1.length;
   r1.forEach((t, c) => {
     t = String(t).trim(); if (!t) return;
     let w = 0; while (c + w < lc && String(r2[c + w]).trim() !== '' && (!w || String(r1[c + w]).trim() === '')) w++;
@@ -141,153 +356,49 @@ function blocks_() {
   });
   return _B;
 }
+// Whole Masters tab, read ONCE per request (every block is sliced from this in memory).
+function mv_() {
+  if (_MV) return _MV;
+  const sh = sheet(T.masters);
+  return (_MV = sh && sh.getLastRow() ? sh.getDataRange().getValues() : []);
+}
+const mastersChanged_ = () => { _MV = null; _B = null; _M = null; };
 
 function getMasters_() {
-  const result = {
-    competitors: [],
-    categories: [],
-    lossReasons: [],
-    sourceTypes: [],
-    conditions: [],
-    priorities: [],
-    parameters: [],
-    tat: [],
-    holidays: []
-  };
-  const sh = sheet(T.masters);
-  if (!sh) return result;
-  const lc = sh.getLastColumn(), lr = sh.getLastRow();
-  if (!lc || lr < 1) return result;
-
-  const r1 = sh.getRange(1, 1, 1, lc).getValues()[0];
-  const colMap = {};
-  r1.forEach((t, i) => {
-    const k = key_(t);
-    if (k) colMap[k] = i + 1;
-  });
-
-  // Check if Row 1 has single-column headers (flat master mode)
-  const isFlat = ['competitor', 'competitors', 'lossReason', 'lossReasons', 'sourceType', 'sourceTypes', 'condition', 'conditions', 'priority', 'priorities', 'category', 'categories'].some(k => colMap[k]);
-
-  if (isFlat && lr >= 2) {
-    const data = sh.getRange(2, 1, lr - 1, lc).getValues();
-    const readCol = (names) => {
-      for (let n = 0; n < names.length; n++) {
-        const c = colMap[names[n]];
-        if (c) {
-          const vals = [];
-          for (let r = 0; r < data.length; r++) {
-            const v = String(data[r][c - 1] || '').trim();
-            if (v && !vals.includes(v)) vals.push(v);
-          }
-          if (vals.length) return vals;
-        }
-      }
-      return [];
-    };
-
-    const comps = readCol(['competitor', 'competitors', 'competitorName']);
-    if (comps.length) {
-      result.competitors = comps.map((name, i) => ({
-        id: 'comp-' + (i + 1),
-        name: name,
-        value: name,
-        headquarters: '',
-        marketSegment: '',
-        website: '',
-        notes: ''
-      }));
-    }
-
-    const cats = readCol(['category', 'categories', 'productCategory']);
-    if (cats.length) {
-      result.categories = cats.map(cat => ({
-        category: cat,
-        name: cat,
-        value: cat,
-        description: ''
-      }));
-    }
-
-    const reasons = readCol(['lossReason', 'lossReasons', 'reason']);
-    if (reasons.length) result.lossReasons = reasons.map(v => ({ value: v, name: v }));
-
-    const sources = readCol(['sourceType', 'sourceTypes', 'source']);
-    if (sources.length) result.sourceTypes = sources.map(v => ({ value: v, name: v }));
-
-    const conds = readCol(['condition', 'conditions']);
-    if (conds.length) result.conditions = conds.map(v => ({ value: v, name: v }));
-
-    const prios = readCol(['priority', 'priorities']);
-    if (prios.length) result.priorities = prios.map(v => ({ value: v, name: v }));
-
-    const resp = readCol(['responsiblePerson', 'responsiblePersons', 'responsible']);
-    if (resp.length) result.responsiblePersons = resp.map(v => ({ value: v, name: v }));
-  }
-
-  // Also check blocks for any remaining / block-defined masters
-  const B = blocks_();
-  Object.keys(B).forEach(k => {
-    if (!result[k] || !result[k].length) {
-      result[k] = readBlock_(k).map(strip_);
-    }
-  });
-
-  // Parameters: check dedicated sheet 'Parameters' / 'Templates' or block 'parameters'
+  if (_M) return _M;
+  const result = { competitors: [], categories: [], lossReasons: [], sourceTypes: [], conditions: [], priorities: [], firmNames: [], parameters: [], tat: [], holidays: [] };
+  // Masters layout: row 1 block titles, row 2 column headings, data from row 3.
+  Object.keys(blocks_()).forEach(k => { result[k] = readBlock_(k).map(strip_); });
+  // Parameters may also live in their own "Parameters" / "Templates" tab.
   const pSh = sheet('Parameters') || sheet('Templates');
   if (pSh && pSh.getLastRow() >= 2) {
-    const { m } = hdr_(pSh, 1);
-    const pLr = pSh.getLastRow(), pLc = pSh.getLastColumn();
-    const rows = pSh.getRange(2, 1, pLr - 1, pLc).getValues();
-    result.parameters = rows.map((r, i) => {
-      const getVal = (k) => m[k] ? r[m[k] - 1] : '';
-      return {
-        category: String(getVal('category') || '').trim(),
-        parameterId: String(getVal('parameterId') || getVal('id') || ('PRM-' + (i + 1))).trim(),
-        name: String(getVal('name') || getVal('parameter') || '').trim(),
-        unit: String(getVal('unit') || '').trim(),
-        minValue: Number(getVal('minValue') || getVal('min') || 0),
-        maxValue: Number(getVal('maxValue') || getVal('max') || 0),
-        ourStandardValue: Number(getVal('ourStandardValue') || getVal('standard') || 0),
-        higherIsBetter: bool_(getVal('higherIsBetter')),
-      };
-    }).filter(p => p.name && p.category);
-  } else if (!result.parameters.length && B.parameters) {
-    result.parameters = readBlock_('parameters').map(strip_);
+    const rows = pSh.getDataRange().getValues(), m = {};
+    rows[0].forEach((h, i) => { if (String(h).trim()) m[key_(h)] = i; });
+    const g = (r, ...ks) => { for (const k of ks) if (m[k] !== undefined && r[m[k]] !== '') return r[m[k]]; return ''; };
+    result.parameters = rows.slice(1).map((r, i) => ({
+      category: String(g(r, 'category')).trim(),
+      parameterId: String(g(r, 'parameterId', 'id') || 'PRM-' + (i + 1)).trim(),
+      name: String(g(r, 'name', 'parameter')).trim(),
+      unit: String(g(r, 'unit')).trim(),
+      minValue: Number(g(r, 'minValue', 'min') || 0),
+      maxValue: Number(g(r, 'maxValue', 'max') || 0),
+      ourStandardValue: Number(g(r, 'ourStandardValue', 'standard') || 0),
+      higherIsBetter: bool_(g(r, 'higherIsBetter'))
+    })).filter(p => p.name && p.category);
   }
-
-  // Defaults fallback
-  if (!result.lossReasons.length) result.lossReasons = ['Price', 'Quality', 'Delivery', 'Other'].map(v => ({ value: v, name: v }));
-  if (!result.sourceTypes.length) result.sourceTypes = ['Customer', 'Market', 'Dealer', 'Online', 'Other'].map(v => ({ value: v, name: v }));
-  if (!result.conditions.length) result.conditions = ['Sealed', 'Opened', 'Damaged', 'Expired'].map(v => ({ value: v, name: v }));
-  if (!result.priorities.length) result.priorities = ['Low', 'Medium', 'High'].map(v => ({ value: v, name: v }));
-
-  return result;
+  Object.keys(DEFAULT_LISTS).forEach(k => { if (!result[k].length) result[k] = DEFAULT_LISTS[k].map(v => ({ value: v, name: v })); });
+  return (_M = result);
 }
 
 function readBlock_(n) {
   const b = blocks_()[n];
-  if (b) {
-    const sh = sheet(T.masters);
-    if (!sh) return [];
-    const last = sh.getLastRow();
-    if (last < 3) return [];
-    return sh.getRange(3, b.col, last - 2, b.keys.length).getValues().map((r, i) => {
-      const o = { _row: 3 + i }; b.keys.forEach((k, j) => o[k] = cell_(r[j])); return o;
-    }).filter(o => o[b.keys[0]] !== '');
-  }
-  const m = getMasters_();
-  return m[n] || [];
+  if (!b) return [];
+  return mv_().slice(2).map((r, i) => {
+    const o = { _row: 3 + i }; b.keys.forEach((k, j) => o[k] = cell_(r[b.col - 1 + j] === undefined ? '' : r[b.col - 1 + j])); return o;
+  }).filter(o => o[b.keys[0]] !== '');
 }
 const strip_ = o => omit_(o, ['_row']);
-const list_ = n => {
-  const m = getMasters_();
-  if (m[n] && Array.isArray(m[n]) && m[n].length) {
-    return m[n].map(o => typeof o === 'object' && o !== null ? (o.value || o.name || o.category || o.id) : o).filter(Boolean);
-  }
-  const b = blocks_()[n];
-  return b ? readBlock_(n).map(o => o[b.keys[0]]) : [];
-};
+const list_ = n => (getMasters_()[n] || []).map(o => typeof o === 'object' && o !== null ? (o.value || o.name || o.category || o.id) : o).filter(Boolean);
 function upsert_(n, mk, rec) {
   const b = blocks_()[n]; if (!b) throw new Error('Masters block "' + n + '" not found');
   if (!b.keys.includes(mk)) throw new Error('Masters block "' + b.title + '" needs a column "' + mk + '"');
@@ -297,8 +408,17 @@ function upsert_(n, mk, rec) {
   const vals = {}; b.keys.forEach((k, i) => { if (rec[k] !== undefined) vals[b.col + i] = conv_(rec[k]); });
   runs_(vals).forEach(([c, v]) => sh.getRange(r, c, 1, v.length).setValues([v]));
   Object.keys(rec).forEach(k => { if (!b.keys.includes(k)) warn_('Masters "' + b.title + '": column "' + k + '" not found, ignored'); });
+  mastersChanged_(); _MD = true;
 }
-function delRow_(n, mk, v) { const b = blocks_()[n]; if (b) readBlock_(n).filter(x => String(x[mk]) === String(v)).forEach(x => sheet(T.masters).getRange(x._row, b.col, 1, b.keys.length).clearContent()); }
+// First of `names` that the block has as a column (falls back to the block's first column).
+const pickKey_ = (b, names) => (b && (names.find(k => b.keys.includes(k)) || b.keys[0])) || names[0];
+// Keep only the fields the block has columns for (no "column not found" warnings for optional extras).
+const onlyKeys_ = (b, rec) => b ? Object.fromEntries(Object.entries(rec).filter(([k]) => b.keys.includes(k))) : rec;
+function delRow_(n, mk, v) {
+  const b = blocks_()[n]; if (!b) return;
+  readBlock_(n).filter(x => String(x[mk]) === String(v)).forEach(x => sheet(T.masters).getRange(x._row, b.col, 1, b.keys.length).clearContent());
+  mastersChanged_(); _MD = true;
+}
 
 function ensureNames_() {
   // TAT and Holidays are purely optional/manual and will NEVER be auto-inserted by script.
@@ -344,8 +464,10 @@ function formulasFor_(m, r) {
     st.forEach((n, i) => {
       if (i === 0) {
         if (n === 2 && !m.actual1) {
-          const dateRef = m.dateLost ? L(m.dateLost) + r : (m.orderDate ? L(m.orderDate) + r : '');
-          f['planned' + n] = dateRef ? `=IF(${dateRef}="","",WORKDAY.INTL(INT(${dateRef}),IFERROR(INDEX(TAT_DAYS,MATCH(${n},TAT_STAGE,0)),1),11${holRef}))` : (m['actual' + n] ? `=IF(${A(n)}="","",INT(${A(n)}))` : '');
+          const dateRef = m.dateLost ? L(m.dateLost) + r : m.orderDate ? L(m.orderDate) + r : m.timestamp ? L(m.timestamp) + r : '';
+          // No Planned 2 when "Sample Required" = No
+          const skip = m.sampleRequired ? `,UPPER(TRIM(${L(m.sampleRequired)}${r}))="NO"` : '';
+          f['planned' + n] = dateRef ? `=IF(OR(${dateRef}=""${skip}),"",WORKDAY.INTL(INT(${dateRef}),IFERROR(INDEX(TAT_DAYS,MATCH(${n},TAT_STAGE,0)),1),11${holRef}))` : (m['actual' + n] ? `=IF(${A(n)}="","",INT(${A(n)}))` : '');
         } else {
           f['planned' + n] = m['actual' + n] ? `=IF(${A(n)}="","",INT(${A(n)}))` : '';
         }
@@ -371,7 +493,7 @@ function formulasFor_(m, r) {
   const pd = `IF(${PP}="",0,IF(TODAY()>${PP},NETWORKDAYS.INTL(${PP},TODAY(),11${holRef})-1,0))`, PD = m.pendingDelay ? L(m.pendingDelay) + r : `(${pd})`;
 
   f.pendingStageNo = '=' + pn; f.pendingPlanned = '=' + pp; f.pendingDelay = '=' + pd;
-  f.pendingStage = `=IF(${PN}<>"",IF(${PN}=2,"Sample Request",IF(${PN}=3,"Sample Receive",IF(${PN}=4,"Test Entry",IF(${PN}=5,"Approval","Stage "&${PN})))),IF(${A(st[st.length - 1])}<>"","Completed",""))`;
+  f.pendingStage = `=IF(${PN}<>"",IF(${PN}=2,"Sample Request",IF(${PN}=3,"Sample Receive",IF(${PN}=4,"Test 1",IF(${PN}=5,"Test 2",IF(${PN}=6,"Management Action",IF(${PN}=7,"Approval","Stage "&${PN})))))),IF(${A(st[st.length - 1])}<>"","Completed",""))`;
   f.totalDelay = '=' + [PD].concat(pendingStages.map(n => `IF(AND(${P(n)}<>"",${A(n)}<>"",INT(${A(n)})>${P(n)}),NETWORKDAYS.INTL(${P(n)},INT(${A(n)}),11${holRef})-1,0)`)).join('+');
 
   return Object.fromEntries(Object.entries(f).filter(([k]) => m[k]));
@@ -383,6 +505,7 @@ function fms_() {
   if (!sh) throw new Error('Tab "' + T.fms + '" not found in spreadsheet.');
   const hr = findHeaderRow_(sh), dr = hr + 1;
   const { m, l } = hdr_(sh, hr);
+  aliasFms_(m, l);
   if (!m[ID]) throw new Error('FMS needs a "Case ID" column in row ' + hr + '.');
   return (_F = { sh, m, l, hr, dr });
 }
@@ -395,18 +518,31 @@ function lastRow_(c) {
 }
 
 function repairFormulas() {
-  _B = _F = null; ensureNames_();
+  resetCaches_(); ensureNames_();
   const c = fms_(), last = lastRow_(c), maxR = c.sh.getMaxRows(), body = Math.max(maxR - c.hr, 1), keys = Object.keys(c.m);
+  const arr = arrayCols_(c);
   if (last >= c.dr) {
     const rows = Array.from({ length: last - c.dr + 1 }, (_, i) => formulasFor_(c.m, c.dr + i));
-    Object.keys(rows[0] || {}).forEach(k => c.sh.getRange(c.dr, c.m[k], rows.length, 1).setFormulas(rows.map(r => [r[k]])));
+    Object.keys(rows[0] || {}).forEach(k => {
+      if (arr[c.m[k]] || isPlanned_(k)) return; // array-formula and Planned columns: the sheet owns them
+      // A column where the sheet already has its own formula keeps it; only empty columns get the app's formula.
+      const first = c.sh.getRange(c.dr, c.m[k]).getFormula();
+      if (first) return;
+      c.sh.getRange(c.dr, c.m[k], rows.length, 1).setFormulas(rows.map(r => [r[k]]));
+    });
+    // Clear stray per-row formulas under an array formula (these cause #REF!).
+    Object.keys(arr).forEach(col => {
+      if (last <= c.dr) return;
+      const rg = c.sh.getRange(c.dr + 1, +col, last - c.dr, 1), fs = rg.getFormulas();
+      fs.forEach((f, i) => { if (f[0]) c.sh.getRange(c.dr + 1 + i, +col).clearContent(); });
+    });
   }
   const st = stages_(c.m), lastA = st.length ? c.m['actual' + st[st.length - 1]] : 0;
   keys.forEach(k => {
     const col = c.m[k], h = c.sh.getRange(c.hr, col).setFontWeight('bold').setWrap(true), rg = c.sh.getRange(c.dr, col, body, 1);
     h.setBackground(isPlanned_(k) ? '#B0BEC5' : isActual_(k) ? '#A5D6A7' : (st.length && col > lastA) ? '#E5E7EB' : ['#E5E7EB', '#DCE9ED', '#E1F4EC', '#FDF3DC', '#E3F0F8', '#F3E6F5'][Math.min(stageOf_(c.m, col), 5)]);
-    if (isActual_(k) || k === 'timestamp') rg.setNumberFormat('dd-mmm-yyyy hh:mm:ss');
-    else if (isPlanned_(k) || k === 'pendingPlanned' || /Date$/.test(k) || k === 'dateLost') rg.setNumberFormat('dd-mmm-yyyy');
+    const fmt = fmtFor_(k);
+    if (fmt) rg.setNumberFormat(fmt);
   });
   c.sh.getProtections(SpreadsheetApp.ProtectionType.RANGE).forEach(p => { if (p.getDescription() === 'Auto column - do not edit') p.remove(); });
   keys.filter(k => isLocked_(k) || isActual_(k)).forEach(k => c.sh.getRange(c.dr, c.m[k], body, 1).protect().setDescription('Auto column - do not edit').setWarningOnly(true));
@@ -424,7 +560,11 @@ const rowObj_ = (c, row, vals) => {
   const o = { row };
   Object.keys(c.m).forEach(k => {
     const idx = c.m[k] - 1;
-    if (idx >= 0 && idx < vals.length) o[k] = cell_(vals[idx]);
+    if (idx >= 0 && idx < vals.length) {
+      const v = vals[idx];
+      // Number columns (Rate / Qty / Enquiry Value) that the sheet formats as a date: read back the real number.
+      o[k] = (v instanceof Date && NUM_KEYS.indexOf(k) >= 0) ? serial_(v) : cell_(v);
+    }
   });
   return o;
 };
@@ -447,7 +587,9 @@ function findCase_(c, id) {
 }
 
 const status_ = o => {
-  if (o.status) return o.status;
+  // A sheet "Status" column only overrides when it holds one of the app's own statuses.
+  const s = String(o.status || '').trim();
+  if (CASE_STATUSES.indexOf(s) >= 0) return s;
   if (!o.actual2 && !o.sampleCode) return 'No Sample';
   if (!o.actual3 && !o.receivedBy) return 'Requested';
   if (!o.actual4 && !o.testedBy) return (o.testResults || o.testResultsJson) ? 'Testing' : 'Received';
@@ -462,14 +604,20 @@ function toCase_(o) {
     else if (o.planned3 && !o.actual3) psNo = 3;
     else if (o.planned4 && !o.actual4) psNo = 4;
     else if (o.planned5 && !o.actual5) psNo = 5;
+    else if (o.planned6 && !o.actual6) psNo = 6;
+    else if (o.planned7 && !o.actual7) psNo = 7;
   }
+  // "Have To Take Sample = No": no sample stage is pending for this order, so it never shows as overdue.
+  const noSample = /^no$/i.test(String(o.sampleRequired || '').trim()) && !o.actual2 && !o.sampleCode;
+  if (noSample) psNo = null;
   const testResults = parse_(o.testResultsJson || o.testResults, []);
   const attachmentList = parse_(o.attachmentLinks || o.attachments, []);
   return Object.assign(c, {
     status: status_(o),
     pendingStageNo: psNo,
-    pendingPlanned: o.pendingPlanned || (psNo ? o['planned' + psNo] : ''),
-    pendingStage: o.pendingStage || (psNo === 2 ? 'Sample Request' : psNo === 3 ? 'Sample Receive' : psNo === 4 ? 'Test Entry' : psNo === 5 ? 'Approval' : (o.actual4 || o.actual5 ? 'Completed' : '')),
+    pendingPlanned: noSample ? '' : (o.pendingPlanned || (psNo ? o['planned' + psNo] : '')),
+    pendingDelay: noSample ? 0 : o.pendingDelay,
+    pendingStage: noSample ? 'Sample Not Required' : o.pendingStage || (psNo === 2 ? 'Sample Request' : psNo === 3 ? 'Sample Receive' : psNo === 4 ? 'Test 1' : psNo === 5 ? 'Test 2' : psNo === 6 ? 'Management Action' : psNo === 7 ? 'Approval' : (o.actual4 || o.actual5 ? 'Completed' : '')),
     results: testResults,
     testResults: testResults,
     attachmentList: attachmentList,
@@ -477,8 +625,8 @@ function toCase_(o) {
     approvalStatus: o.approvalStatus || (o.actual4 ? 'Pending Approval' : ''),
     competitorName: o.competitorName || o.competitor || '',
     competitor: o.competitor || o.competitorName || '',
-    orderDate: o.orderDate || o.dateLost || '',
-    dateLost: o.dateLost || o.orderDate || '',
+    orderDate: o.orderDate || o.dateLost || o.timestamp || '',
+    dateLost: o.dateLost || o.orderDate || o.timestamp || '',
     timestamp: o.timestamp || '',
     orderNotes: o.orderNotes || o.notes || '',
     notes: o.notes || o.orderNotes || '',
@@ -492,7 +640,7 @@ function toCase_(o) {
 // Planned columns are NEVER written by the app (sheet formula / sheet driven).
 // Actual N is stamped by script with new Date() only on form submit.
 function put_(c, row, parts, stamp, allowId) {
-  const fm = c.sh.getRange(row, 1, 1, c.sh.getLastColumn()).getFormulas()[0], vals = {};
+  const fm = c.sh.getRange(row, 1, 1, c.sh.getLastColumn()).getFormulas()[0], vals = {}, arr = arrayCols_(c);
   parts.forEach(p => {
     const fields = Array.isArray(p) ? p[0] : p;
     const opt = Array.isArray(p) ? (p[1] || {}) : {};
@@ -500,7 +648,8 @@ function put_(c, row, parts, stamp, allowId) {
       if (k === ID && !allowId && !opt.allowId) return;
       const col = c.m[k];
       if (!col) return warn_('FMS: column "' + k + '" not found, value ignored');
-      if (isLocked_(k) || isActual_(k) || (fm[col - 1] && fm[col - 1] !== '')) return;
+      // Never write into planned/derived/actual columns, a formula cell, or a column filled by an array formula.
+      if (isLocked_(k) || isActual_(k) || arr[col] || (fm[col - 1] && fm[col - 1] !== '')) return;
       vals[col] = conv_(fields[k]);
     });
   });
@@ -509,6 +658,9 @@ function put_(c, row, parts, stamp, allowId) {
     else warn_('FMS: column "Actual ' + stamp + '" not found');
   }
   runs_(vals).forEach(([col, v]) => c.sh.getRange(row, col, 1, v.length).setValues([v]));
+  // Keep date / number formats right on the cells just written (e.g. Actual 4 = dd/mm/yyyy hh:mm:ss).
+  const byCol = Object.fromEntries(Object.keys(c.m).map(k => [c.m[k], k]));
+  formatRow_(c, row, Object.keys(vals).map(col => byCol[col]).filter(Boolean));
 }
 
 function next_(c, key, prefix, start, pad) {
@@ -521,17 +673,53 @@ function next_(c, key, prefix, start, pad) {
   return prefix + String(max + 1).padStart(pad, '0');
 }
 
+// New FMS row. The sheet owns its formulas:
+//  - columns driven by an array formula in the first data row (e.g. Planned 2 = {A6:A}) are never written,
+//    otherwise the array can't expand and shows #REF!;
+//  - other formula columns copy the previous row's formula;
+//  - the app's own formulas are only used for the very first data row.
 function newRow_(c) {
-  const prev = lastRow_(c), r = prev + 1, gen = formulasFor_(c.m, r), byCol = {};
-  Object.keys(gen).forEach(k => byCol[c.m[k]] = gen[k]);
+  const prev = lastRow_(c), r = prev + 1, arr = arrayCols_(c), byCol = {};
+  // Planned columns (Planned 2, 3, 4, 5 ...) belong to the sheet's own formulas: the app never writes them.
+  const plannedCol = {};
+  Object.keys(c.m).forEach(k => { if (isPlanned_(k)) plannedCol[c.m[k]] = true; });
   if (r > c.sh.getMaxRows()) c.sh.insertRowsAfter(c.sh.getMaxRows(), 100);
   if (prev >= c.dr) {
+    // Copy the previous row's formulas in contiguous blocks (one write per block, not one per cell).
+    const copy = {};
     c.sh.getRange(prev, 1, 1, c.sh.getLastColumn()).getFormulasR1C1()[0].forEach((f, i) => {
-      if (f && !byCol[i + 1]) c.sh.getRange(r, i + 1).setFormulaR1C1(f);
+      if (f && !arr[i + 1] && !plannedCol[i + 1]) copy[i + 1] = f;
     });
+    runs_(copy).forEach(([col, fs]) => c.sh.getRange(r, col, 1, fs.length).setFormulasR1C1([fs]));
+  } else {
+    const gen = formulasFor_(c.m, r);
+    Object.keys(gen).forEach(k => { if (!arr[c.m[k]] && !isPlanned_(k)) byCol[c.m[k]] = gen[k]; });
+    runs_(byCol).forEach(([col, fs]) => c.sh.getRange(r, col, 1, fs.length).setFormulas([fs]));
   }
-  runs_(byCol).forEach(([col, fs]) => c.sh.getRange(r, col, 1, fs.length).setFormulas([fs]));
+  formatRow_(c, r);
   return r;
+}
+
+// Columns whose first data-row cell holds a spilling/array formula ({A6:A}, ARRAYFORMULA, FILTER, MAP ...).
+const ARRAY_RE = /^=\s*\{|ARRAYFORMULA\s*\(|\b(FILTER|MAP|BYROW|SCAN|SORT|UNIQUE|QUERY|SEQUENCE)\s*\(|\$?[A-Z]{1,3}\$?\d+\s*:\s*\$?[A-Z]{1,3}(?![\d$A-Z])/i;
+function arrayCols_(c) {
+  if (_A) return _A;
+  const lc = c.sh.getLastColumn(), out = (_A = {});
+  if (!lc) return out;
+  c.sh.getRange(c.dr, 1, 1, lc).getFormulas()[0].forEach((f, i) => { if (f && ARRAY_RE.test(f)) out[i + 1] = true; });
+  return out;
+}
+
+// Number formats: every date/time column = dd/mm/yyyy hh:mm:ss, amount/qty/rate columns = plain number.
+const DATE_FMT = 'dd/mm/yyyy hh:mm:ss', NUM_FMT = '#,##0.##';
+// Date -> the sheet's serial number (days since 30-Dec-1899), e.g. 09-Apr-1900 -> 100.
+const serial_ = d => Math.round(((d.getTime() - new Date(1899, 11, 30).getTime()) / 86400000) * 1e6) / 1e6;
+const NUM_KEYS = ['qty', 'orderValue', 'competitorRate'];
+const fmtFor_ = k => (isPlanned_(k) || isActual_(k) || k === 'timestamp' || k === 'pendingPlanned' || /date/i.test(k)) ? DATE_FMT : NUM_KEYS.indexOf(k) >= 0 ? NUM_FMT : null;
+function formatRow_(c, r, keys) {
+  const by = {};
+  (keys || Object.keys(c.m)).forEach(k => { const f = fmtFor_(k); if (f && c.m[k]) (by[f] = by[f] || []).push(L(c.m[k]) + r); });
+  Object.keys(by).forEach(f => c.sh.getRangeList(by[f]).setNumberFormat(f));
 }
 
 /* ---------------- users ---------------- */
@@ -661,7 +849,6 @@ function saveFile_(dataUrl, name, prefix) {
 
 /* ---------------- snapshot ---------------- */
 function snapshot_(u) {
-  SpreadsheetApp.flush();
   const c = fms_(), uc = usersCtx_(), any = u.isAdmin || Object.values(u.perm).some(v => v && v !== 'none');
   const last = lastRow_(c), tmpl = last >= c.dr ? c.sh.getRange(last, 1, 1, c.sh.getLastColumn()).getFormulas()[0] : [];
   return {
@@ -693,15 +880,42 @@ const ACTIONS = {
     need(u, ['lostOrders']);
     need_(p, ['customer', 'product', 'category', 'orderValue', 'lossReason', 'orderDate']);
     positive_(p.orderValue, 'Order value');
-    let compName = p.competitorName || '';
-    if (p.competitorId) {
+    // Optional fields from the "Order Not Received" form. Validated when sent;
+    // older clients that don't send them keep working.
+    const has = v => v !== undefined && v !== null && String(v).trim() !== '';
+    if (has(p.qty)) positive_(p.qty, 'Qty');
+    if (has(p.competitorRate)) positive_(p.competitorRate, 'Rate');
+    if (has(p.fmsName)) {
+      const fmsList = list_('fmsNames').map(String);
+      if ((fmsList.length ? fmsList : FMS_NAMES).indexOf(String(p.fmsName)) < 0) throw new Error('Invalid FMS name: ' + p.fmsName);
+    }
+    if (has(p.sampleRequired) && ['Yes', 'No'].indexOf(String(p.sampleRequired)) < 0) throw new Error('Have To Take Sample must be Yes or No');
+    const enquiryNo = has(p.enquiryNo) ? String(p.enquiryNo).trim() : '';
+    const c = fms_();
+    // Block duplicate Enquiry No (reads only the Enquiry No + Case ID columns, before a new row is created).
+    if (enquiryNo && c.m.enquiryNo) {
+      const last = lastRow_(c);
+      if (last >= c.dr) {
+        const enq = c.sh.getRange(c.dr, c.m.enquiryNo, last - c.hr, 1).getValues(), ids = c.sh.getRange(c.dr, c.m[ID], last - c.hr, 1).getValues();
+        const i = enq.findIndex(r => String(r[0]).trim().toLowerCase() === enquiryNo.toLowerCase());
+        if (i >= 0) throw new Error('Enquiry No "' + enquiryNo + '" is already logged as ' + ids[i][0] + '.');
+      }
+    }
+    // New competitor / category typed in the form: added to Masters in the same request.
+    let compName = String(p.newCompetitorName || p.competitorName || '').trim();
+    if (p.newCompetitorName) {
+      try { ACTIONS.saveCompetitor(u, { name: compName }); } catch (e) { if (!/already exists/.test(e.message)) throw e; }
+    } else if (p.competitorId) {
       const comp = readBlock_('competitors').find(x => x.id === p.competitorId);
-      if (comp) compName = comp.name;
-      if (!compName) compName = p.competitorId;
+      compName = (comp && (comp.name || comp.value)) || p.competitorId;
     }
     if (!compName) compName = 'Other';
-    ensureNames_();
-    const c = fms_(), caseId = next_(c, ID, 'LO-', 1001, 0);
+    const cat = String(p.category).trim();
+    if (blocks_().categories && list_('categories').map(x => String(x).toLowerCase()).indexOf(cat.toLowerCase()) < 0) {
+      const cb = blocks_().categories, ck = pickKey_(cb, ['category', 'name', 'value', 'categories']);
+      upsert_('categories', ck, { [ck]: cat });
+    }
+    const caseId = next_(c, ID, 'LO-', 1001, 0);
     const r = newRow_(c);
     const rec = {
       caseId: caseId,
@@ -719,7 +933,22 @@ const ACTIONS = {
       dateLost: p.orderDate,
       enteredBy: u.name
     };
-    put_(c, r, [rec], 1, true); // true = allowId
+    // Only write new-form fields that were actually sent (missing columns raise a warning, never silently drop data).
+    if (enquiryNo) rec.enquiryNo = enquiryNo;
+    if (has(p.qty)) rec.qty = Number(p.qty);
+    if (has(p.fmsName)) rec.fmsName = String(p.fmsName);
+    if (has(p.competitorRate)) rec.competitorRate = Number(p.competitorRate);
+    if (has(p.sampleRequired)) rec.sampleRequired = String(p.sampleRequired);
+    if (has(p.firmName)) rec.firmName = String(p.firmName).trim();
+    // Same value under alternate names: write whichever columns exist, skip the rest quietly.
+    [['competitor', 'competitorName'], ['orderDate', 'dateLost']].forEach(g => {
+      if (g.some(k => c.m[k])) g.forEach(k => { if (!c.m[k]) delete rec[k]; });
+    });
+    if (!c.m.orderDate && !c.m.dateLost && c.m.timestamp) { delete rec.orderDate; delete rec.dateLost; } // Timestamp is the loss date
+    if (!c.m.competitorId) delete rec.competitorId; // helper column, optional
+    if (!c.m.enteredBy) delete rec.enteredBy; // optional column
+    put_(c, r, [rec], c.m.actual1 ? 1 : 0, true); // Actual 1 only if the sheet has it; true = allowId
+    return { caseId };
   },
 
   deleteLostOrder(u, p) {
@@ -767,65 +996,39 @@ const ACTIONS = {
     put_(c, o.row, [rec], 3);
   },
 
-  // Step 4: Test Entry -> writes Tested By, Test Results (JSON), Pass Count, Fail Count, Overall Result, Attachment Links, Actual 4 (Planned 4 is NEVER overwritten)
-  saveTest(u, p) {
-    const { c, o } = open_(u, p, 'testEntry', 4);
-    const params = readBlock_('parameters').filter(x => x.category === o.category);
-    if (!params.length) throw new Error('No test parameters for category "' + o.category + '". Add them in Test Templates first.');
-    const inp = Object.fromEntries((p.results || []).map(r => [r.parameterId, r]));
-    let pass = 0, fail = 0, filled = 0;
-    const results = params.map(x => {
-      const raw = inp[x.parameterId]; let v = null, ok = null;
-      if (raw && raw.measuredValue !== null && raw.measuredValue !== undefined && raw.measuredValue !== '') {
-        v = Number(raw.measuredValue);
-        if (isNaN(v)) throw new Error('Invalid number for ' + x.name);
-      }
-      if (v !== null) {
-        filled++;
-        ok = v >= +x.minValue && v <= +x.maxValue;
-        ok ? pass++ : fail++;
-      }
-      return { parameterId: x.parameterId, name: x.name, unit: x.unit, min: +x.minValue, max: +x.maxValue, standard: +x.ourStandardValue, higherIsBetter: bool_(x.higherIsBetter), measuredValue: v, passed: ok, notes: (raw && raw.notes) || '' };
-    });
-    if (p.markCompleted && filled < params.length) throw new Error('Enter valid measurements for all ' + params.length + ' parameters before completing.');
-    
-    const existingRaw = o.attachmentLinks || o.attachments || '';
-    const files = parse_(existingRaw, []);
-    (p.attachments || []).forEach(a => files.push({ name: a.name, url: saveFile_(a.dataUrl, a.name, o.sampleCode || o.caseId), uploadedAt: nowIso_() }));
-
-    const rec = {
-      testedBy: u.name,
-      passCount: pass,
-      failCount: fail,
-      overallResult: p.markCompleted ? (fail ? 'Fail' : 'Pass') : 'In Progress'
-    };
-    if (c.m.testResultsJson) rec.testResultsJson = results;
-    if (c.m.testResults) rec.testResults = results;
-    if (!c.m.testResultsJson && !c.m.testResults) rec.testResults = results;
-
-    if (c.m.attachmentLinks) rec.attachmentLinks = files;
-    if (c.m.attachments) rec.attachments = files;
-    if (!c.m.attachmentLinks && !c.m.attachments) rec.attachments = files;
-
-    put_(c, o.row, [rec], p.markCompleted ? 4 : 0);
-  },
+  // Step 4: Test 1 (Test 1) -> status, date, tested by, lab fields, template results, attachments, Actual 4. Planned 4 is never written.
+  saveTest(u, p) { return saveLabTest_(u, p); },
 
   approveReport(u, p) {
-    const { c, o } = open_(u, p, 'reports', 5, ['approvalStatus']);
+    // Step 5 = Test 2, Step 6 = Management Action, so approval is Step 7.
+    const { c, o } = open_(u, p, 'reports', 7, ['approvalStatus']);
     if (!['Approved', 'Revision Requested', 'Pending Approval'].includes(p.approvalStatus)) throw new Error('Invalid approval status');
     const ok = p.approvalStatus === 'Approved';
-    put_(c, o.row, [Object.assign(omit_(p, ['caseId']), ok ? { approvedBy: u.name } : {})], ok ? 5 : 0);
+    put_(c, o.row, [Object.assign(omit_(p, ['caseId']), ok ? { approvedBy: u.name } : {})], ok ? 7 : 0);
   },
+
+  saveTest2(u, p) { return saveLabTest2_(u, p); },
+  saveManagement(u, p) { return saveManagement_(u, p); },
 
   updateCase(u, p) { need(u, ['lostOrders', 'samples', 'testEntry', 'reports']); need_(p, ['caseId']); const c = fms_(); put_(c, findCase_(c, p.caseId).row, [p.fields || {}]); },
 
   // masters
   saveCompetitor(u, p) {
     need(u, ['lostOrders', 'competitors']); need_(p, ['name']);
-    if (readBlock_('competitors').some(x => String(x.name).toLowerCase() === String(p.name).trim().toLowerCase() && x.id !== p.id)) throw new Error('Competitor already exists');
-    upsert_('competitors', 'id', Object.assign({}, p, { id: p.id || 'comp-' + Date.now().toString(36) }));
+    const cb = blocks_().competitors, nameKey = pickKey_(cb, ['name', 'competitor', 'competitorName', 'value']);
+    if (readBlock_('competitors').some(x => String(x[nameKey] ?? x.name ?? '').toLowerCase() === String(p.name).trim().toLowerCase() && (!p.id || x.id !== p.id))) throw new Error('Competitor already exists');
+    if (cb && !cb.keys.includes('id')) { // block without an ID column: match on the name column
+      const nk = pickKey_(cb, ['name', 'competitor', 'competitorName', 'value']);
+      upsert_('competitors', nk, onlyKeys_(cb, Object.assign({}, p, { [nk]: String(p.name).trim() })));
+      return;
+    }
+    upsert_('competitors', 'id', onlyKeys_(cb, Object.assign({}, p, { id: p.id || 'comp-' + Date.now().toString(36) })));
   },
-  saveCategory(u, p) { need(u, ['templates', 'lostOrders']); need_(p, ['category']); upsert_('categories', 'category', { category: String(p.category).trim(), description: p.description }); },
+  saveCategory(u, p) {
+    need(u, ['templates', 'lostOrders']); need_(p, ['category']);
+    const cb = blocks_().categories, ck = pickKey_(cb, ['category', 'name', 'value', 'categories']);
+    upsert_('categories', ck, onlyKeys_(cb, { [ck]: String(p.category).trim(), description: p.description }));
+  },
   saveParameter(u, p) {
     need(u, ['templates']); need_(p, ['category', 'name', 'unit']);
     const mn = +p.minValue, mx = +p.maxValue, sd = +p.ourStandardValue;
@@ -836,7 +1039,7 @@ const ACTIONS = {
   },
   deleteParameter(u, p) { need(u, ['templates']); need_(p, ['parameterId']); delRow_('parameters', 'parameterId', p.parameterId); },
   saveTat(u, p) { admin_(u); (p.rows || []).forEach(r => { if (isNaN(+r.tatDays) || +r.tatDays < 0) throw new Error('TAT must be 0 or more'); upsert_('tat', 'stage', { stage: +r.stage, tatDays: +r.tatDays, step: r.step }); }); },
-  saveHolidays(u, p) { admin_(u); const b = blocks_().holidays, sh = sheet(T.masters); if (b && sh) { sh.getRange(3, b.col, Math.max(sh.getMaxRows() - 2, 1), b.keys.length).clearContent(); (p.rows || []).filter(r => r.date).forEach(r => upsert_('holidays', 'date', { date: r.date, name: r.name || '' })); } },
+  saveHolidays(u, p) { admin_(u); const b = blocks_().holidays, sh = sheet(T.masters); if (b && sh) { sh.getRange(3, b.col, Math.max(sh.getMaxRows() - 2, 1), b.keys.length).clearContent(); mastersChanged_(); _MD = true; (p.rows || []).filter(r => r.date).forEach(r => upsert_('holidays', 'date', { date: r.date, name: r.name || '' })); } },
   saveMasterRow(u, p) { admin_(u); need_(p, ['block', 'matchKey']); upsert_(p.block, p.matchKey, p.record || {}); },
   deleteMasterRow(u, p) { admin_(u); need_(p, ['block', 'matchKey', 'value']); delRow_(p.block, p.matchKey, p.value); },
 
@@ -854,17 +1057,30 @@ function doPost(e) {
   try { return json_({ ok: true, data: route_(JSON.parse(e.postData.contents)) }); }
   catch (err) { return json_({ ok: false, error: String(err && err.message ? err.message : err) }); }
 }
+// Write actions answer with a small PATCH (only what changed), not the whole sheet:
+//  - case actions -> just that case row; deleteLostOrder -> its id; Masters edits -> masters; user edits -> users.
+// Reads (getAll / login) return the full snapshot and never take the script lock.
+const CASE_ACTIONS = ['addLostOrder', 'requestSample', 'receiveSample', 'saveTest', 'saveTest2', 'saveManagement', 'updateCase', 'approveReport'];
+const USER_ACTIONS = ['saveUser', 'deleteUser', 'resetPassword'];
 function route_(req) {
-  _B = _F = _UC = _U = null; _W = [];
+  resetCaches_(); _W = [];
+  if (!sheet(T.fms) || !sheet(T.users) || !sheet(T.masters)) setup();
+  if (req.action === 'login') return login_(req.payload || {});
+  const u = auth_(req.token), a = req.action, p = req.payload || {};
+  if (a === 'logout') { CacheService.getScriptCache().remove('tok_' + req.token); return { loggedOut: true }; }
+  if (!Object.prototype.hasOwnProperty.call(ACTIONS, a)) throw new Error('Unknown action: ' + a);
+  if (a === 'getAll') return snapshot_(u);
   const lock = LockService.getScriptLock(); lock.waitLock(25000);
   try {
-    if (!sheet(T.fms) || !sheet(T.users) || !sheet(T.masters)) setup();
-    if (req.action === 'login') return login_(req.payload || {});
-    const u = auth_(req.token);
-    if (req.action === 'logout') { CacheService.getScriptCache().remove('tok_' + req.token); return { loggedOut: true }; }
-    if (!Object.prototype.hasOwnProperty.call(ACTIONS, req.action)) throw new Error('Unknown action: ' + req.action);
-    ACTIONS[req.action](u, req.payload || {});
-    _B = null;
-    return snapshot_(users_().find(x => x.id === u.id) || u);
+    const res = ACTIONS[a](u, p) || {};
+    SpreadsheetApp.flush(); // let sheet formulas (Planned / pending stage) recalculate before reading the row back
+    const me = users_().find(x => x.id === u.id) || u;
+    const out = { patch: true, user: pub_(me), serverTime: nowIso_(), warnings: _W.slice() };
+    const id = res.caseId || p.caseId;
+    if (CASE_ACTIONS.indexOf(a) >= 0 && id) out.cases = [toCase_(findCase_(fms_(), id))];
+    if (a === 'deleteLostOrder') out.removedCaseIds = [p.caseId];
+    if (_MD) out.masters = getMasters_();
+    if (USER_ACTIONS.indexOf(a) >= 0 && me.isAdmin) { _U = null; out.users = users_().map(pub_); }
+    return out;
   } finally { lock.releaseLock(); }
 }

@@ -1,15 +1,26 @@
-import { useEffect, useRef } from 'react';
+import { lazy, Suspense, useEffect, useRef } from 'react';
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { Loader2, LogOut, Microscope, ShieldAlert } from 'lucide-react';
 import { LabProvider, useLab } from './context/LabContext';
 import { ThemeProvider } from './context/ThemeContext';
 import { Layout } from './components/Layout';
 import { LoginScreen } from './components/LoginScreen';
-import { DashboardPage } from './pages/DashboardPage';
-import { LostOrdersPage } from './pages/LostOrdersPage';
-import { SamplesPage } from './pages/SamplesPage';
-import { TestEntryPage } from './pages/TestEntryPage';
-import { UsersPage } from './pages/UsersPage';
+// Each page is its own chunk: only the page you open is downloaded (charts / PDF libs load only where used).
+const DashboardPage = lazy(() => import('./pages/DashboardPage').then((m) => ({ default: m.DashboardPage })));
+const LostOrdersPage = lazy(() => import('./pages/LostOrdersPage').then((m) => ({ default: m.LostOrdersPage })));
+const SamplesPage = lazy(() => import('./pages/SamplesPage').then((m) => ({ default: m.SamplesPage })));
+const TestEntryPage = lazy(() => import('./pages/TestEntryPage').then((m) => ({ default: m.TestEntryPage })));
+const Test2Page = lazy(() => import('./pages/Test2Page').then((m) => ({ default: m.Test2Page })));
+const ManagementPage = lazy(() => import('./pages/ManagementPage').then((m) => ({ default: m.ManagementPage })));
+const UsersPage = lazy(() => import('./pages/UsersPage').then((m) => ({ default: m.UsersPage })));
+
+function PageFallback() {
+  return (
+    <div className="flex items-center justify-center py-24 text-[var(--text-muted)]">
+      <Loader2 className="w-6 h-6 animate-spin" aria-hidden="true" />
+    </div>
+  );
+}
 import { canViewPage, getFirstAllowedPath } from './utils/auth';
 import type { PageKey } from './types/lab';
 
@@ -140,6 +151,7 @@ function AppRoutes() {
 
   return (
     <Layout>
+      <Suspense fallback={<PageFallback />}>
       <Routes>
         <Route
           path="/"
@@ -158,11 +170,20 @@ function AppRoutes() {
           element={<ProtectedRoute pageKey="testEntry" element={<TestEntryPage />} />}
         />
         <Route
+          path="/test-2"
+          element={<ProtectedRoute pageKey="testEntry" element={<Test2Page />} />}
+        />
+        <Route
+          path="/management-action"
+          element={<ProtectedRoute pageKey="management" element={<ManagementPage />} />}
+        />
+        <Route
           path="/users"
           element={<ProtectedRoute adminOnly element={<UsersPage />} />}
         />
         <Route path="*" element={<Navigate to={firstAllowedPath} replace />} />
       </Routes>
+      </Suspense>
     </Layout>
   );
 }

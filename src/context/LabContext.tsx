@@ -63,6 +63,7 @@ const EMPTY_MASTERS: MastersData = {
   sourceTypes: [],
   conditions: [],
   priorities: [],
+  firmNames: [],
   tat: [],
   holidays: [],
 };
@@ -102,6 +103,48 @@ function normalizeCaseRecord(raw: LabCase): LabCase {
   };
 }
 
+/** Small response from a write action: only the rows / lists that changed. */
+interface SnapshotPatch {
+  patch: true;
+  user?: User;
+  serverTime?: string;
+  warnings?: string[];
+  cases?: LabCase[];
+  removedCaseIds?: string[];
+  masters?: MastersData;
+  users?: User[];
+}
+
+function isSnapshotPatch(x: unknown): x is SnapshotPatch {
+  return Boolean(x && typeof x === 'object' && (x as { patch?: unknown }).patch === true);
+}
+
+function mergePatch(prev: LabSnapshot | null, p: SnapshotPatch): LabSnapshot {
+  const base = prev ?? normalizeSnapshot({} as LabSnapshot);
+  let cases = base.cases;
+  if (p.removedCaseIds?.length) {
+    const gone = new Set(p.removedCaseIds);
+    cases = cases.filter((c) => !gone.has(c.caseId));
+  }
+  if (p.cases?.length) {
+    cases = [...cases];
+    for (const c of p.cases) {
+      const i = cases.findIndex((x) => x.caseId === c.caseId);
+      if (i >= 0) cases[i] = c;
+      else cases.push(c);
+    }
+  }
+  return {
+    ...base,
+    user: p.user ?? base.user,
+    cases,
+    masters: p.masters ?? base.masters,
+    users: p.users ?? base.users,
+    warnings: p.warnings ?? [],
+    serverTime: p.serverTime ?? base.serverTime,
+  };
+}
+
 function normalizeSnapshot(raw: LabSnapshot): LabSnapshot {
   const rawMasters: Partial<MastersData> = raw.masters || {};
   const rawSchema: Partial<LabSchema> = raw.schema || {};
@@ -109,8 +152,26 @@ function normalizeSnapshot(raw: LabSnapshot): LabSnapshot {
     user: raw.user,
     cases: Array.isArray(raw.cases) ? raw.cases.map(normalizeCaseRecord) : [],
     masters: {
-      competitors: Array.isArray(rawMasters.competitors) ? rawMasters.competitors : [],
-      categories: Array.isArray(rawMasters.categories) ? rawMasters.categories : [],
+      // Masters blocks may use "Name" / "Value" / "Category" headings: always expose
+      // competitors[].name and categories[].category as strings, and drop blank rows.
+      competitors: (Array.isArray(rawMasters.competitors) ? rawMasters.competitors : [])
+        .map((c) => {
+          const r = c as unknown as Record<string, unknown>;
+          const name = String(r.name ?? r.value ?? r.competitor ?? r.competitorName ?? '').trim();
+          return { ...c, id: String(r.id ?? '').trim() || name, name };
+        })
+        .filter((c) => c.name && !/^(name|value)$/i.test(c.name)),
+      categories: (Array.isArray(rawMasters.categories) ? rawMasters.categories : [])
+        .map((c) => {
+          const r = c as unknown as Record<string, unknown>;
+          const category = String(r.category ?? r.name ?? r.value ?? r.categories ?? '').trim();
+          return { ...c, category };
+        })
+        .filter((c, i, all) =>
+          c.category &&
+          !/^(category|name|value)$/i.test(c.category) &&
+          all.findIndex((x) => x.category.toLowerCase() === c.category.toLowerCase()) === i
+        ),
       parameters: Array.isArray(rawMasters.parameters)
         ? rawMasters.parameters.map((p) => ({
             ...p,
@@ -124,6 +185,11 @@ function normalizeSnapshot(raw: LabSnapshot): LabSnapshot {
       sourceTypes: Array.isArray(rawMasters.sourceTypes) ? rawMasters.sourceTypes : [],
       conditions: Array.isArray(rawMasters.conditions) ? rawMasters.conditions : [],
       priorities: Array.isArray(rawMasters.priorities) ? rawMasters.priorities : [],
+      firmNames: Array.isArray(rawMasters.firmNames) ? rawMasters.firmNames : [],
+      fmsNames: Array.isArray(rawMasters.fmsNames) ? rawMasters.fmsNames : [],
+      testStatus: Array.isArray(rawMasters.testStatus) ? rawMasters.testStatus : [],
+      testedBy: Array.isArray(rawMasters.testedBy) ? rawMasters.testedBy : [],
+      flowOfMaterial: Array.isArray(rawMasters.flowOfMaterial) ? rawMasters.flowOfMaterial : [],
       tat: Array.isArray(rawMasters.tat)
         ? rawMasters.tat.map((t) => ({
             ...t,
@@ -183,9 +249,16 @@ interface LabContextValue {
     category: string;
     orderValue: number;
     competitorId: string;
+    newCompetitorName?: string;
     lossReason: string;
     orderDate: string;
     notes: string;
+    enquiryNo?: string;
+    firmName?: string;
+    qty?: number;
+    fmsName?: string;
+    competitorRate?: number;
+    sampleRequired?: 'Yes' | 'No';
   }) => Promise<LabSnapshot | null>;
   deleteLostOrder: (caseId: string) => Promise<boolean>;
 
@@ -207,7 +280,23 @@ interface LabContextValue {
     results: Array<{ parameterId: string; measuredValue: number | null; notes?: string }>;
     attachments: Array<{ name: string; dataUrl: string }>;
     markCompleted: boolean;
+    testStatus?: string;
+    testRemarks?: string;
+    dateOfTest?: string;
+    testedBy?: string;
+    lab?: Record<string, string>;
   }) => Promise<LabSnapshot | null>;
+
+  saveTest2: (input: {
+    caseId: string;
+    testStatus: string;
+    testRemarks: string;
+    dateOfTest: string;
+    testedBy: string;
+    lab: Record<string, string>;
+  }) => Promise<LabSnapshot | null>;
+
+  saveManagement: (input: { caseId: string; remark6: string }) => Promise<LabSnapshot | null>;
 
   // Reports
   approveReport: (input: {
@@ -264,14 +353,21 @@ export function LabProvider({ children }: { children: React.ReactNode }) {
 
   const clearSessionState = useCallback(() => {
     saveToken(null);
+    snapshotRef.current = null;
     setSnapshot(null);
     setMustChangePassword(false);
     shownWarningsRef.current.clear();
   }, []);
 
+  // Latest snapshot, so a small PATCH from a write action can be merged synchronously.
+  const snapshotRef = useRef<LabSnapshot | null>(null);
+
   const applySnapshot = useCallback(
-    (rawSnapshot: LabSnapshot): LabSnapshot => {
-      const normalized = normalizeSnapshot(rawSnapshot);
+    (rawSnapshot: LabSnapshot | SnapshotPatch): LabSnapshot => {
+      const normalized = normalizeSnapshot(
+        isSnapshotPatch(rawSnapshot) ? mergePatch(snapshotRef.current, rawSnapshot) : rawSnapshot
+      );
+      snapshotRef.current = normalized;
       setSnapshot(normalized);
 
       if (normalized.warnings.length > 0) {
@@ -310,7 +406,8 @@ export function LabProvider({ children }: { children: React.ReactNode }) {
       try {
         const result = await call<T>(action, payload);
         if (options.updateSnapshot !== false && result && typeof result === 'object') {
-          applySnapshot(result as unknown as LabSnapshot);
+          // Always hand callers the full, merged snapshot (write actions only send back what changed).
+          return applySnapshot(result as unknown as LabSnapshot) as unknown as T;
         }
         return result;
       } catch (err) {
@@ -493,9 +590,16 @@ export function LabProvider({ children }: { children: React.ReactNode }) {
       category: string;
       orderValue: number;
       competitorId: string;
+      newCompetitorName?: string;
       lossReason: string;
       orderDate: string;
       notes: string;
+      enquiryNo?: string;
+      firmName?: string;
+      qty?: number;
+      fmsName?: string;
+      competitorRate?: number;
+      sampleRequired?: 'Yes' | 'No';
     }): Promise<LabSnapshot | null> => {
       const next = await runAction('addLostOrder', input);
       if (!next) return null;
@@ -606,9 +710,18 @@ export function LabProvider({ children }: { children: React.ReactNode }) {
       results: Array<{ parameterId: string; measuredValue: number | null; notes?: string }>;
       attachments: Array<{ name: string; dataUrl: string }>;
       markCompleted: boolean;
+      testStatus?: string;
+      testRemarks?: string;
+      dateOfTest?: string;
+      testedBy?: string;
+      lab?: Record<string, string>;
     }): Promise<LabSnapshot | null> => {
       const next = await runAction('saveTest', input);
       if (!next) return null;
+      if (input.testStatus !== undefined) {
+        addToast({ type: 'success', title: 'Lab Test data saved successfully!', message: `${input.caseId} · ${input.testStatus}` });
+        return normalizeSnapshot(next);
+      }
       addToast({
         type: 'success',
         title: input.markCompleted ? 'Lab testing completed' : 'Draft measurements saved',
@@ -616,6 +729,33 @@ export function LabProvider({ children }: { children: React.ReactNode }) {
           ? 'Comparison & executive report are ready for review.'
           : 'Measurements persisted to sheet.',
       });
+      return normalizeSnapshot(next);
+    },
+    [runAction, addToast]
+  );
+
+  const saveTest2 = useCallback(
+    async (input: {
+      caseId: string;
+      testStatus: string;
+      testRemarks: string;
+      dateOfTest: string;
+      testedBy: string;
+      lab: Record<string, string>;
+    }): Promise<LabSnapshot | null> => {
+      const next = await runAction('saveTest2', input);
+      if (!next) return null;
+      addToast({ type: 'success', title: 'Test 2 data saved successfully!', message: `${input.caseId} · ${input.testStatus}` });
+      return normalizeSnapshot(next);
+    },
+    [runAction, addToast]
+  );
+
+  const saveManagement = useCallback(
+    async (input: { caseId: string; remark6: string }): Promise<LabSnapshot | null> => {
+      const next = await runAction('saveManagement', input);
+      if (!next) return null;
+      addToast({ type: 'success', title: 'Management action saved successfully!', message: input.caseId });
       return normalizeSnapshot(next);
     },
     [runAction, addToast]
@@ -735,6 +875,8 @@ export function LabProvider({ children }: { children: React.ReactNode }) {
       requestSample,
       receiveSample,
       saveTest,
+      saveTest2,
+      saveManagement,
       approveReport,
       saveCategory,
       saveParameter,
@@ -765,6 +907,8 @@ export function LabProvider({ children }: { children: React.ReactNode }) {
       requestSample,
       receiveSample,
       saveTest,
+      saveTest2,
+      saveManagement,
       approveReport,
       saveCategory,
       saveParameter,
